@@ -1,0 +1,95 @@
+# ---------------------------------------------------------------------------
+# 불법사이트 URL 수집 봇 설정
+#
+# 이 파일을 config/config.yaml 로 복사한 뒤 값을 수정하세요.
+#   Windows: copy config\config.example.yaml config\config.yaml
+#   Linux  : cp config/config.example.yaml config/config.yaml
+#
+# 모든 상대 경로는 프로젝트 루트(이 폴더의 상위) 기준입니다.
+# ---------------------------------------------------------------------------
+
+crawl:
+  # 한 사이클(전체 홍보사이트 1회 순회)이 끝난 뒤 다음 사이클까지 대기 시간(초)
+  interval_seconds: 3600
+  # 대기 시간에 더해지는 무작위 지연(초). 접속 패턴이 일정해지는 것을 막습니다.
+  jitter_seconds: 300
+  # 동시에 요청할 홍보사이트 개수. 워크스테이션이면 4~8 정도가 적당합니다.
+  concurrency: 4
+  # 같은 호스트에 연속 요청할 때 최소 간격(초). 상대 서버 부하를 줄입니다.
+  per_host_delay_seconds: 2.0
+  request_timeout_seconds: 20
+  max_retries: 2
+  retry_backoff_seconds: 3.0
+  # 한 홍보사이트에서 추가로 따라 들어갈 내부 목록/페이지 수 (1이면 첫 페이지만)
+  max_pages_per_source: 3
+  # 응답 본문 최대 크기(바이트). 초과하면 잘라서 파싱합니다.
+  max_response_bytes: 5242880
+  # 홍보 배너가 중간 경유(리다이렉트) 페이지를 쓰는 경우 최종 도착지를 추적합니다.
+  resolve_candidate_redirects: true
+  max_redirect_hops: 5
+  # 한 사이클에서 리다이렉트를 추적할 최대 후보 수 (과도한 트래픽 방지)
+  max_redirect_resolutions: 150
+  # robots.txt 를 준수합니다. 수집 목적/법적 근거를 검토한 뒤에만 false 로 바꾸세요.
+  respect_robots: true
+  verify_tls: true
+  user_agent: "IllegalSiteMonitorBot/1.0 (+compliance-monitoring; contact: admin@example.com)"
+  # 추가 요청 헤더가 필요하면 여기에
+  extra_headers:
+    Accept-Language: "ko-KR,ko;q=0.9,en;q=0.8"
+
+renderer:
+  # 자바스크립트로 배너를 그리는 홍보사이트가 있을 때만 true.
+  # 사전 준비: pip install playwright && playwright install chromium
+  enabled: false
+  wait_ms: 2500
+  headless: true
+  # true 면 모든 사이트를 브라우저로 렌더링, false 면 targets.yaml 에서
+  # render: true 로 지정한 사이트만 렌더링합니다.
+  render_all: false
+
+alive_check:
+  # 이미 수집된 불법사이트가 아직 살아있는지 주기적으로 확인합니다.
+  enabled: true
+  # 몇 사이클마다 확인할지 (6 이면 1시간 주기 * 6 = 6시간)
+  every_cycles: 6
+  timeout_seconds: 10
+  # 한 번에 확인할 사이트 수 (오래된 확인 순서로)
+  batch_size: 200
+
+export:
+  directory: "data/exports"
+  filename: "불법사이트_URL목록.xlsx"
+  # 날짜별 스냅샷(불법사이트_URL목록_20260909.xlsx)도 함께 남깁니다.
+  keep_daily_snapshots: true
+  snapshot_retention_days: 90
+  # 이 점수 이상만 엑셀에 기록 (0~100). 낮추면 후보가 늘고 오탐도 늘어납니다.
+  min_score: 30
+  # 엑셀에서 URL을 클릭 가능한 하이퍼링크로 만들지 여부.
+  # 실수로 불법사이트에 접속하는 것을 막기 위해 기본값은 false(일반 텍스트)입니다.
+  clickable_links: false
+  # 매 사이클마다 엑셀을 다시 생성합니다. false 면 신규 수집이 있을 때만 생성.
+  always_rewrite: false
+
+storage:
+  database: "data/collector.sqlite3"
+  # 관측 이력(어느 홍보사이트에서 언제 발견했는지) 보관 일수. 0 이면 무제한.
+  observation_retention_days: 180
+
+dashboard:
+  # 브라우저에서 봇 ON/OFF 를 누를 수 있는 로컬 관리 화면
+  enabled: true
+  host: "127.0.0.1"   # 외부에 노출하지 마세요. 0.0.0.0 사용 시 반드시 token 설정.
+  port: 8787
+  # 비워두면 인증 없음(127.0.0.1 전용). 값을 넣으면 조작 시 토큰이 필요합니다.
+  token: ""
+
+logging:
+  level: "INFO"        # DEBUG / INFO / WARNING / ERROR
+  directory: "logs"
+  retention_days: 14
+
+runtime:
+  # PID / ON·OFF 상태 / 하트비트 파일이 저장되는 폴더
+  state_directory: "run"
+  # 봇을 처음 실행했을 때 수집 상태(ON/OFF) 기본값
+  start_enabled: true

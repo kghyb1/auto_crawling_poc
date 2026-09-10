@@ -1,0 +1,13 @@
+# 필수 의존성
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+openpyxl>=3.1.0
+PyYAML>=6.0
+
+# 선택: 자바스크립트로 배너를 그리는 홍보사이트를 수집할 때만 필요
+#   pip install playwright && playwright install chromium
+# playwright>=1.44.0
+
+# 개발/테스트용
+# pytest>=8.0.0

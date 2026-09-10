@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# 수집 대상 홍보사이트 목록 (= 불법사이트 배너/링크가 걸려 있는 페이지)
+#
+# 이 파일을 config/targets.yaml 로 복사한 뒤 실제 주소를 채워 넣으세요.
+# 저장소에는 실제 주소를 커밋하지 않는 것을 권장합니다(.gitignore 에
+# targets.local.yaml 이 등록되어 있습니다).
+#
+# CLI 로도 추가할 수 있습니다:
+#   python bot.py add-source https://example-promo.test/ --name "예시 홍보사이트"
+# ---------------------------------------------------------------------------
+
+sources:
+  # --- 아래는 형식 예시입니다. 실제 수집 대상으로 교체하세요. ---
+  - url: "https://promo-example-1.test/"
+    name: "예시 홍보사이트 1"
+    enabled: false          # true 로 바꾸면 수집 대상이 됩니다
+    render: false           # 자바스크립트 렌더링이 필요하면 true (renderer.enabled 도 켜야 함)
+    note: "메인 페이지 배너 영역"
+
+  - url: "https://promo-example-2.test/board/list"
+    name: "예시 홍보사이트 2 - 게시판"
+    enabled: false
+    render: false
+    # 이 사이트에서만 내부 페이지를 더 깊게 따라가고 싶을 때
+    max_pages: 5
+    note: "게시글 목록에 링크가 올라옴"
+
+# 내부 페이지(2페이지, 목록 페이지 등)를 따라갈 때 사용하는 링크 패턴.
+# 위 max_pages / crawl.max_pages_per_source 값만큼 추가로 수집합니다.
+pagination_patterns:
+  - "page="
+  - "/page/"
+  - "paged="
+  - "bbs"
+  - "board"
+  - "list"
+  - "wr_id"
+  - "idx="

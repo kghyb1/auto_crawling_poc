@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "illegal-site-bot"
+version = "1.0.0"
+description = "불법홍보사이트에서 홍보되는 불법사이트 URL을 수집해 엑셀로 정리하는 24시간 봇"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "openpyxl>=3.1.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+render = ["playwright>=1.44.0"]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+illegal-site-bot = "illegal_site_bot.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

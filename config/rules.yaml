@@ -1,0 +1,297 @@
+# ---------------------------------------------------------------------------
+# 불법사이트 판별 규칙
+#
+# 점수 계산 방식
+#   최종점수 = base_score
+#            + 링크 텍스트/배너 alt 키워드 점수 (anchor_weight 배)
+#            + 링크 주변 문맥 키워드 점수 (context_weight 배)
+#            + 도메인 패턴 점수
+#            + 의심 TLD 점수
+#            + 여러 홍보사이트에서 중복 발견 시 보너스 (아래 cross_source_bonus)
+#   -> 0~100 으로 절단
+#
+# 카테고리는 점수가 가장 높은 쪽으로 결정됩니다.
+# 운영하면서 오탐/미탐이 보이면 이 파일만 수정하면 됩니다(코드 수정 불필요).
+# ---------------------------------------------------------------------------
+
+scoring:
+  # 홍보사이트에서 외부로 나가는 링크라는 사실 자체의 기본 점수
+  base_score: 15
+  anchor_weight: 1.0
+  context_weight: 0.35
+  # 서로 다른 홍보사이트 N곳에서 발견될 때마다 더해지는 점수 (최대치 포함)
+  cross_source_bonus_per_source: 6
+  cross_source_bonus_max: 24
+  # 한 카테고리에서 키워드로 얻을 수 있는 최대 점수
+  keyword_score_cap: 60
+
+thresholds:
+  # 이 점수 이상이면 "불법사이트 후보"로 저장
+  candidate: 25
+  # 이 점수 이상이면 엑셀에서 '높음'으로 표시
+  high: 65
+
+categories:
+  gambling:
+    label: "도박/베팅"
+    keywords:
+      카지노: 25
+      바카라: 25
+      슬롯: 20
+      토토: 25
+      사설토토: 30
+      스포츠토토: 25
+      배팅: 20
+      베팅: 20
+      벳: 12
+      먹튀: 22
+      먹튀검증: 25
+      보증업체: 20
+      안전놀이터: 28
+      메이저놀이터: 28
+      놀이터: 10
+      꽁머니: 28
+      첫충: 25
+      매충: 25
+      돌발: 12
+      총판: 20
+      환전: 15
+      롤링: 12
+      홀덤: 22
+      포커: 15
+      룰렛: 20
+      파워볼: 25
+      미니게임: 18
+      사다리: 15
+      다리다리: 20
+      스포츠북: 22
+      라이브카지노: 28
+      에볼루션: 20
+      프라그마틱: 20
+      야마토: 22
+      슬롯사이트: 28
+      승무패: 18
+      핸디캡: 15
+      언더오버: 18
+      배당: 12
+      casino: 20
+      baccarat: 22
+      slot: 12
+      betting: 18
+      toto: 20
+      poker: 12
+      holdem: 18
+
+  adult:
+    label: "성인/음란"
+    keywords:
+      야동: 28
+      무료야동: 30
+      성인: 15
+      성인사이트: 28
+      "19금": 20
+      웹캠: 18
+      조건만남: 30
+      출장안마: 28
+      립카페: 28
+      오피: 22
+      건마: 22
+      유흥: 20
+      밤문화: 22
+      호빠: 22
+      룸살롱: 22
+      av: 15
+      porn: 25
+      adult: 12
+
+  piracy:
+    label: "저작권침해"
+    keywords:
+      무료웹툰: 28
+      웹툰: 12
+      다시보기: 25
+      무료영화: 28
+      영화다시보기: 28
+      드라마다시보기: 28
+      링크모음: 22
+      주소모음: 22
+      토렌트: 28
+      torrent: 25
+      실시간tv: 22
+      무료중계: 25
+      스포츠중계: 22
+      해외축구중계: 25
+      먹튀없는: 15
+      누누: 20
+      티비: 10
+
+  finance:
+    label: "불법금융"
+    keywords:
+      소액결제현금화: 32
+      정보이용료현금화: 32
+      신용카드현금화: 32
+      상품권매입: 28
+      카드깡: 30
+      작업대출: 30
+      급전대출: 28
+      무담보대출: 22
+      개인돈: 22
+      일수: 18
+      환전소: 20
+
+  drug:
+    label: "의약품/마약"
+    keywords:
+      비아그라: 28
+      시알리스: 28
+      정품비아그라: 30
+      발기: 18
+      최음제: 30
+      물뽕: 32
+      대마: 25
+      액상대마: 32
+      떨: 15
+
+  counterfeit:
+    label: "위조품/기타"
+    keywords:
+      이미테이션: 25
+      レプリカ: 20
+      짝퉁: 25
+      명품레플리카: 30
+      대리입금: 25
+      통장대여: 30
+      명의대여: 30
+
+# 도메인 자체의 형태로 판단하는 휴리스틱 (정규식, 등록가능도메인에 매칭)
+domain_patterns:
+  - pattern: '^[a-z]{2,12}-?(?:777|888|999|365|24|100|1004)\.'
+    score: 12
+    reason: "숫자 조합 도메인"
+  - pattern: '(?:casino|baccara|baccarat|slot|toto|bet|bett|betting|gamble)'
+    score: 20
+    reason: "도박 관련 영문 도메인"
+  - pattern: '(?:porn|sex|xxx|adult|av19|yadong)'
+    score: 20
+    reason: "성인 관련 영문 도메인"
+  - pattern: '(?:webtoon|toon|movie|drama|tv|link|juso)\d'
+    score: 10
+    reason: "저작권침해 의심 도메인"
+  - pattern: '^[a-z]{1,4}\d{2,6}\.'
+    score: 10
+    reason: "짧은 영문+숫자 도메인(대량 생성 의심)"
+  - pattern: '-(?:kr|kor|korea)\d*\.'
+    score: 6
+    reason: "국가 접미사 조합"
+
+# 도박/불법 사이트가 자주 쓰는 TLD
+suspicious_tlds:
+  xyz: 8
+  top: 8
+  vip: 10
+  icu: 8
+  cc: 6
+  bet: 14
+  casino: 16
+  game: 6
+  live: 5
+  win: 10
+  men: 8
+  club: 6
+  online: 5
+  site: 5
+  space: 6
+  fun: 6
+  life: 4
+  shop: 3
+  asia: 4
+  su: 8
+  ru: 4
+
+# 연락 채널(텔레그램/카톡 등). 불법사이트 URL 은 아니지만 신고 자료로 유용해서
+# 별도 카테고리로 기록하고 엑셀에서도 별도 시트로 분리합니다.
+contact_domains:
+  - t.me
+  - telegram.me
+  - telegram.org
+  - telegra.ph
+  - open.kakao.com
+  - pf.kakao.com
+  - line.me
+  - wa.me
+  - discord.gg
+
+# 아래 도메인들은 불법사이트 후보에서 완전히 제외합니다.
+exclude:
+  # 정확히 이 등록가능도메인이면 제외
+  domains:
+    - google.com
+    - google.co.kr
+    - gstatic.com
+    - googleapis.com
+    - googletagmanager.com
+    - google-analytics.com
+    - doubleclick.net
+    - youtube.com
+    - youtu.be
+    - facebook.com
+    - fb.com
+    - instagram.com
+    - twitter.com
+    - x.com
+    - tiktok.com
+    - pinterest.com
+    - linkedin.com
+    - naver.com
+    - naver.net
+    - pstatic.net
+    - daum.net
+    - kakao.com
+    - kakaocdn.net
+    - tistory.com
+    - blogspot.com
+    - wordpress.org
+    - wordpress.com
+    - w3.org
+    - schema.org
+    - jquery.com
+    - jsdelivr.net
+    - cloudflare.com
+    - cloudflareinsights.com
+    - bootstrapcdn.com
+    - unpkg.com
+    - cdnjs.com
+    - fontawesome.com
+    - github.com
+    - github.io
+    - microsoft.com
+    - apple.com
+    - adobe.com
+    - mozilla.org
+    - whatsapp.com
+    - amazonaws.com
+    - akamaized.net
+    - jquery.org
+    - wikipedia.org
+    - police.go.kr
+    - kcsc.or.kr
+    - kocsc.or.kr
+    - go.kr
+    - gov.kr
+  # 등록가능도메인이 이 문자열로 끝나면 제외 (CDN/광고망 등)
+  domain_suffixes:
+    - .gov
+    - .edu
+    - .mil
+    - .go.kr
+    - .ac.kr
+    - .or.kr
+  # URL 이 이 정규식에 걸리면 제외 (이미지/스크립트/공유버튼 등)
+  url_patterns:
+    - '\.(?:png|jpe?g|gif|webp|svg|ico|css|js|woff2?|ttf|eot|mp4|webm|mp3|zip|pdf)(?:\?|$)'
+    - '^https?://[^/]+/(?:robots\.txt|sitemap[^/]*\.xml)'
+    - '(?:facebook|twitter|x)\.com/(?:sharer|share|intent)'
+    - '^mailto:'
+    - '^tel:'
+    - '^javascript:'

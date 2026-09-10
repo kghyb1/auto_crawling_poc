@@ -1,0 +1,48 @@
+# Linux 워크스테이션/서버에서 24시간 운영할 때 쓰는 systemd 유닛.
+#
+# 설치 방법
+#   1) 이 파일의 User / WorkingDirectory / ExecStart 경로를 실제 환경에 맞게 수정
+#   2) sudo cp scripts/linux/illegal-site-bot.service /etc/systemd/system/
+#   3) sudo systemctl daemon-reload
+#   4) sudo systemctl enable --now illegal-site-bot
+#
+# 확인 / 조작
+#   systemctl status illegal-site-bot        서비스 상태
+#   journalctl -u illegal-site-bot -f        로그 실시간 보기
+#   python bot.py on / off                   수집만 ON/OFF (서비스는 계속 실행)
+#   sudo systemctl stop illegal-site-bot     서비스까지 정지
+
+[Unit]
+Description=불법사이트 URL 수집 봇 (24시간 운영)
+Documentation=file:///opt/illegal-site-bot/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+Group=botuser
+WorkingDirectory=/opt/illegal-site-bot
+
+# 가상환경을 쓰지 않으면 /usr/bin/python3 으로 바꾸세요.
+ExecStart=/opt/illegal-site-bot/.venv/bin/python bot.py start
+ExecStop=/opt/illegal-site-bot/.venv/bin/python bot.py stop
+
+# 죽으면 항상 다시 띄웁니다.
+Restart=always
+RestartSec=10
+TimeoutStopSec=90
+
+# 로그는 봇이 logs/ 폴더에 직접 남기고, 표준 출력은 journal 로 보냅니다.
+StandardOutput=journal
+StandardError=journal
+
+# 최소 권한 설정
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/illegal-site-bot
+
+[Install]
+WantedBy=multi-user.target

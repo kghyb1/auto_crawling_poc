@@ -1,0 +1,37 @@
+# 런타임 산출물 (커밋하지 않음)
+data/
+logs/
+run/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.xlsx
+!docs/**/*.xlsx
+
+# 사용자 개별 설정. 저장소에는 *.example.yaml 과 rules.yaml 만 커밋합니다.
+# targets.yaml 에는 실제 수집 대상 주소가 들어가므로 절대 커밋하지 않습니다.
+config/config.yaml
+config/targets.yaml
+config/config.local.yaml
+config/targets.local.yaml
+
+# 파이썬
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# OS / 에디터
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
