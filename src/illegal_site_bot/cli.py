@@ -611,15 +611,25 @@ def cmd_evaluate(args: argparse.Namespace, config: Config) -> int:
 
 
 def cmd_mark(args: argparse.Namespace, config: Config) -> int:
-    """사이트의 처리 상태/메모를 기록합니다 (엑셀에도 그대로 표시됩니다)."""
+    """사이트의 처리 상태/메모를 기록합니다 (엑셀에도 그대로 표시됩니다).
+
+    엑셀이 호스트 단위로 묶여 나오므로, 전체 URL 대신 엑셀에서 읽은 호스트나
+    도메인을 그대로 넣어도 됩니다. 그 아래 URL 이 한꺼번에 처리됩니다.
+    """
     storage = Storage(config.database_path)
     try:
-        url = _require_url(args.url)
-        if storage.set_site_status(url, args.status, args.memo):
-            print(f"기록했습니다: {url} → {args.status}")
-            return EXIT_OK
-        print(f"수집 목록에 없는 주소입니다: {url}")
-        return EXIT_ERROR
+        urls = storage.mark_sites(args.url, args.status, args.memo)
+        if not urls:
+            print(f"수집 목록에서 찾지 못했습니다: {args.url}")
+            print("전체 URL, 호스트(abc.com), 도메인 중 아무거나 넣을 수 있습니다.")
+            return EXIT_ERROR
+
+        print(f"{len(urls)}건을 '{args.status}' 로 기록했습니다.")
+        for url in urls[:10]:
+            print(f"  - {url}")
+        if len(urls) > 10:
+            print(f"  … 외 {len(urls) - 10}건")
+        return EXIT_OK
     finally:
         storage.close()
 
@@ -791,8 +801,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluate.set_defaults(func=cmd_evaluate)
 
-    mark = subparsers.add_parser("mark", help="사이트의 처리 상태/메모를 기록합니다")
-    mark.add_argument("url", metavar="URL")
+    mark = subparsers.add_parser(
+        "mark", help="사이트의 처리 상태/메모를 기록합니다 (URL·호스트·도메인 모두 가능)"
+    )
+    mark.add_argument("url", metavar="URL_또는_호스트")
     mark.add_argument(
         "--status", choices=SITE_STATUSES, default="confirmed", help="처리 상태"
     )

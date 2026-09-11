@@ -166,22 +166,23 @@ class TestExcelExport:
             "실행이력",
         ]
 
-    def test_main_sheet_lists_urls_with_scores(self, exported):
+    def test_main_sheet_lists_hosts_with_scores(self, exported):
         sheet = load_workbook(exported.path)["불법사이트목록"]
         headers = [cell.value for cell in sheet[1]]
-        assert headers[:6] == ["번호", "URL", "도메인", "카테고리", "위험도", "점수"]
+        assert headers[:6] == ["번호", "호스트", "대표 URL", "URL 수", "발견된 URL", "도메인"]
 
         rows = {row[1]: row for row in sheet.iter_rows(min_row=2, values_only=True)}
-        assert "https://casino-abc777.xyz/" in rows
-        casino = rows["https://casino-abc777.xyz/"]
-        assert casino[2] == "casino-abc777.xyz"   # 도메인
-        assert casino[3] == "도박/베팅"            # 카테고리
-        assert isinstance(casino[5], int) and casino[5] > 0  # 점수
+        assert "casino-abc777.xyz" in rows
+        casino = rows["casino-abc777.xyz"]
+        assert casino[2] == "https://casino-abc777.xyz/"   # 대표 URL
+        assert casino[5] == "casino-abc777.xyz"            # 도메인
+        assert casino[6] == "도박/베팅"                     # 카테고리
+        assert isinstance(casino[8], int) and casino[8] > 0  # 점수
 
     def test_urls_are_plain_text_by_default(self, exported):
         sheet = load_workbook(exported.path)["불법사이트목록"]
         # 실수로 접속하지 않도록 기본값은 하이퍼링크가 아닙니다.
-        assert sheet.cell(row=2, column=2).hyperlink is None
+        assert sheet.cell(row=2, column=3).hyperlink is None
 
     def test_contacts_go_to_their_own_sheet(self, exported):
         workbook = load_workbook(exported.path)
@@ -191,8 +192,9 @@ class TestExcelExport:
         main = [
             row[1] for row in workbook["불법사이트목록"].iter_rows(min_row=2, values_only=True)
         ]
+        # 연락 채널은 묶지 않으므로 계정별 전체 URL 이 그대로 남습니다.
         assert "https://t.me/promo_admin_contact" in contacts
-        assert "https://t.me/promo_admin_contact" not in main
+        assert "t.me" not in main
 
     def test_promo_source_sheet_lists_the_source(self, exported, promo_server):
         sheet = load_workbook(exported.path)["홍보사이트_수집원"]
@@ -203,8 +205,8 @@ class TestExcelExport:
 
     def test_new_sheet_contains_todays_finds(self, exported):
         sheet = load_workbook(exported.path)["신규_최근24시간"]
-        urls = [row[1] for row in sheet.iter_rows(min_row=2, values_only=True)]
-        assert "https://casino-abc777.xyz/" in urls
+        hosts = [row[1] for row in sheet.iter_rows(min_row=2, values_only=True)]
+        assert "casino-abc777.xyz" in hosts
 
     def test_export_is_rewritable(self, bot, exported):
         exporter = Exporter(bot["config"], bot["storage"], bot["classifier"])
@@ -220,10 +222,10 @@ class TestExcelExport:
         sheet = load_workbook(result.path)["불법사이트목록"]
         row = next(
             row for row in sheet.iter_rows(min_row=2, values_only=True)
-            if row[1] == "https://casino-abc777.xyz/"
+            if row[1] == "casino-abc777.xyz"
         )
-        assert row[17] == "신고완료"
-        assert row[18] == "신고 완료"
+        assert row[20] == "신고완료"
+        assert row[21] == "신고 완료"
 
 
 class TestRobots:

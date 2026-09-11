@@ -888,6 +888,49 @@ class Storage:
         )
         return max(0, cursor.rowcount)
 
+    def mark_sites(self, target: str, status: str, memo: str | None = None) -> list[str]:
+        """URL / 호스트 / 도메인 중 무엇으로 지정하든 해당하는 사이트를 모두 표시합니다.
+
+        엑셀이 호스트 단위로 묶여 나오므로, 사람이 거기서 읽은 호스트를 그대로
+        넣어도 동작해야 합니다. 처리한 URL 목록을 돌려줍니다.
+        """
+        if status not in SITE_STATUSES:
+            raise ValueError(f"status 는 {SITE_STATUSES} 중 하나여야 합니다.")
+
+        candidate = target.strip()
+        host = host_of(candidate) or candidate.strip("/").lower()
+        domain = registrable_domain(host) or host
+
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT url FROM sites WHERE url = ?", (candidate,)
+            ).fetchall()
+            if not rows:
+                rows = self._conn.execute(
+                    "SELECT url FROM sites WHERE host = ?", (host,)
+                ).fetchall()
+            if not rows:
+                rows = self._conn.execute(
+                    "SELECT url FROM sites WHERE domain = ?", (domain,)
+                ).fetchall()
+            if not rows:
+                return []
+
+            urls = [row["url"] for row in rows]
+            placeholders = ", ".join("?" for _ in urls)
+            if memo is None:
+                self._conn.execute(
+                    f"UPDATE sites SET status = ? WHERE url IN ({placeholders})",
+                    [status, *urls],
+                )
+            else:
+                self._conn.execute(
+                    f"UPDATE sites SET status = ?, memo = ? WHERE url IN ({placeholders})",
+                    [status, memo, *urls],
+                )
+            self._conn.commit()
+            return urls
+
     def set_site_status(self, url: str, status: str, memo: str | None = None) -> bool:
         if status not in SITE_STATUSES:
             raise ValueError(f"status 는 {SITE_STATUSES} 중 하나여야 합니다.")

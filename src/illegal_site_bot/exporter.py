@@ -32,6 +32,12 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+from .aggregation import (
+    DEFAULT_GROUP_MODE,
+    GROUP_LABELS,
+    SiteGroup,
+    group_sites,
+)
 from .classifier import CONTACT_CATEGORY, Classifier
 from .config import Config
 from .storage import Storage
@@ -59,11 +65,14 @@ STATUS_TEXT = {
     "ignored": "제외",
 }
 
-# (헤더, 너비)
+# (헤더, 너비) — 두 번째 컬럼 이름은 묶음 기준에 따라 달라집니다.
 SITE_COLUMNS: tuple[tuple[str, int], ...] = (
     ("번호", 6),
-    ("URL", 52),
-    ("도메인", 26),
+    ("사이트", 34),
+    ("대표 URL", 44),
+    ("URL 수", 8),
+    ("발견된 URL", 46),
+    ("도메인", 24),
     ("카테고리", 12),
     ("위험도", 8),
     ("점수", 7),
@@ -71,16 +80,24 @@ SITE_COLUMNS: tuple[tuple[str, int], ...] = (
     ("최근 발견", 18),
     ("발견 횟수", 9),
     ("홍보사이트 수", 12),
-    ("발견된 홍보사이트", 40),
-    ("일치 키워드", 28),
+    ("발견된 홍보사이트", 38),
+    ("일치 키워드", 26),
     ("판별 근거", 26),
-    ("경유 URL", 30),
+    ("경유 URL", 26),
     ("생존", 9),
     ("HTTP", 7),
     ("확인 시각", 18),
     ("처리 상태", 10),
-    ("메모", 24),
+    ("메모", 22),
 )
+
+
+def site_columns(mode: str) -> tuple[tuple[str, int], ...]:
+    """묶음 기준에 맞춰 두 번째 컬럼 이름을 바꿔 돌려줍니다."""
+    columns = list(SITE_COLUMNS)
+    columns[1] = (GROUP_LABELS.get(mode, "사이트"), columns[1][1])
+    return tuple(columns)
+
 
 SOURCE_COLUMNS: tuple[tuple[str, int], ...] = (
     ("번호", 6),
@@ -136,6 +153,7 @@ class ExportResult:
     rows: int
     new_rows: int
     contacts: int
+    url_rows: int = 0
     warning: str = ""
 
 
@@ -170,68 +188,73 @@ class Exporter:
         self.classifier = classifier
 
     # -- 시트별 작성 -------------------------------------------------------
+    @property
+    def group_mode(self) -> str:
+        return self.config.export.group_by or DEFAULT_GROUP_MODE
+
+    def _group(self, rows: Sequence[sqlite3.Row], mode: str | None = None) -> list[SiteGroup]:
+        rules = self.classifier.rules
+        return group_sites(
+            rows,
+            self.storage.source_urls_grouped(),
+            mode=mode or self.group_mode,
+            bonus_per_source=rules.cross_source_bonus_per_source,
+            bonus_max=rules.cross_source_bonus_max,
+        )
+
     def _write_sites_sheet(
-        self,
-        sheet: Worksheet,
-        rows: Sequence[sqlite3.Row],
-        source_map: dict[int, list[str]],
+        self, sheet: Worksheet, groups: Sequence[SiteGroup], mode: str | None = None
     ) -> None:
-        _style_header(sheet, SITE_COLUMNS)
+        _style_header(sheet, site_columns(mode or self.group_mode))
         clickable = self.config.export.clickable_links
+        wrap = Alignment(wrap_text=True, vertical="top")
+        center = Alignment(horizontal="center")
 
-        for index, row in enumerate(rows, start=1):
+        for index, group in enumerate(groups, start=1):
             excel_row = index + 1
-            risk = self.classifier.risk_label(int(row["score"]))
-            sources = source_map.get(int(row["id"]), [])
+            risk = self.classifier.risk_label(group.score)
 
-            sheet.cell(row=excel_row, column=1, value=index).alignment = Alignment(
-                horizontal="center"
+            sheet.cell(row=excel_row, column=1, value=index).alignment = center
+            sheet.cell(row=excel_row, column=2, value=group.key).font = Font(
+                name="Consolas", size=10
             )
-            _write_url(sheet, excel_row, 2, row["url"], clickable)
-            sheet.cell(row=excel_row, column=3, value=row["domain"])
-            sheet.cell(row=excel_row, column=4, value=row["category_label"])
+            _write_url(sheet, excel_row, 3, group.representative_url, clickable)
 
-            risk_cell = sheet.cell(row=excel_row, column=5, value=risk)
-            risk_cell.alignment = Alignment(horizontal="center")
+            count_cell = sheet.cell(row=excel_row, column=4, value=group.url_count)
+            count_cell.alignment = center
+            sheet.cell(row=excel_row, column=5, value=group.urls_text).alignment = wrap
+            sheet.cell(row=excel_row, column=6, value=group.domain)
+            sheet.cell(row=excel_row, column=7, value=group.category_label)
+
+            risk_cell = sheet.cell(row=excel_row, column=8, value=risk)
+            risk_cell.alignment = center
             if risk in RISK_FILLS:
                 risk_cell.fill = RISK_FILLS[risk]
 
-            sheet.cell(row=excel_row, column=6, value=int(row["score"])).alignment = Alignment(
-                horizontal="center"
-            )
-            sheet.cell(row=excel_row, column=7, value=local_str(row["first_seen_at"]))
-            sheet.cell(row=excel_row, column=8, value=local_str(row["last_seen_at"]))
-            sheet.cell(row=excel_row, column=9, value=int(row["seen_count"]))
-            sheet.cell(row=excel_row, column=10, value=int(row["distinct_sources"]))
-            sheet.cell(row=excel_row, column=11, value="\n".join(sources)).alignment = Alignment(
-                wrap_text=True, vertical="top"
-            )
-            sheet.cell(row=excel_row, column=12, value=row["matched_keywords"]).alignment = (
-                Alignment(wrap_text=True, vertical="top")
-            )
-            sheet.cell(row=excel_row, column=13, value=row["reasons"]).alignment = Alignment(
-                wrap_text=True, vertical="top"
-            )
-            sheet.cell(row=excel_row, column=14, value=row["redirect_from"])
-            alive_cell = sheet.cell(
-                row=excel_row, column=15, value=ALIVE_TEXT.get(row["alive"], "미확인")
-            )
-            alive_cell.alignment = Alignment(horizontal="center")
-            sheet.cell(row=excel_row, column=16, value=row["http_status"]).alignment = Alignment(
-                horizontal="center"
-            )
-            sheet.cell(row=excel_row, column=17, value=local_str(row["last_checked_at"]))
-            sheet.cell(
-                row=excel_row, column=18, value=STATUS_TEXT.get(row["status"], row["status"])
-            ).alignment = Alignment(horizontal="center")
-            sheet.cell(row=excel_row, column=19, value=row["memo"]).alignment = Alignment(
-                wrap_text=True, vertical="top"
-            )
+            sheet.cell(row=excel_row, column=9, value=group.score).alignment = center
+            sheet.cell(row=excel_row, column=10, value=local_str(group.first_seen_at))
+            sheet.cell(row=excel_row, column=11, value=local_str(group.last_seen_at))
+            sheet.cell(row=excel_row, column=12, value=group.seen_count).alignment = center
+            sheet.cell(row=excel_row, column=13, value=group.distinct_sources).alignment = center
+            sheet.cell(row=excel_row, column=14, value=group.sources_text).alignment = wrap
+            sheet.cell(row=excel_row, column=15, value=group.matched_keywords).alignment = wrap
+            sheet.cell(row=excel_row, column=16, value=group.reasons).alignment = wrap
+            sheet.cell(row=excel_row, column=17, value=group.redirect_from)
 
-        if rows:
-            last = len(rows) + 1
+            sheet.cell(
+                row=excel_row, column=18, value=ALIVE_TEXT.get(group.alive, "미확인")
+            ).alignment = center
+            sheet.cell(row=excel_row, column=19, value=group.http_status).alignment = center
+            sheet.cell(row=excel_row, column=20, value=local_str(group.last_checked_at))
+            sheet.cell(
+                row=excel_row, column=21, value=STATUS_TEXT.get(group.status, group.status)
+            ).alignment = center
+            sheet.cell(row=excel_row, column=22, value=group.memo).alignment = wrap
+
+        if groups:
+            last = len(groups) + 1
             sheet.conditional_formatting.add(
-                f"F2:F{last}",
+                f"I2:I{last}",
                 DataBarRule(
                     start_type="num",
                     start_value=0,
@@ -355,6 +378,7 @@ class Exporter:
         total_rows: int,
         new_rows: int,
         contacts: int,
+        url_count: int = 0,
     ) -> None:
         sheet.column_dimensions["A"].width = 26
         sheet.column_dimensions["B"].width = 30
@@ -368,8 +392,12 @@ class Exporter:
 
         last_run = self.storage.last_run()
         rows: list[tuple[str, Any]] = [
-            ("수집된 불법사이트(전체)", int(summary.get("total") or 0)),
-            (f"엑셀 수록 기준({self.config.export.min_score}점 이상)", total_rows),
+            ("수집된 불법사이트 (URL 기준, 전체)", int(summary.get("total") or 0)),
+            (
+                f"엑셀 수록 ({GROUP_LABELS.get(self.group_mode, '사이트')} 기준, "
+                f"{self.config.export.min_score}점 이상)",
+                f"{total_rows}건  (URL {url_count}개를 묶음)",
+            ),
             ("최근 24시간 신규", int(summary.get("new_24h") or 0)),
             ("최근 7일 신규", int(summary.get("new_7d") or 0)),
             ("생존 확인", int(summary.get("alive") or 0)),
@@ -505,19 +533,25 @@ class Exporter:
             if row["category"] != CONTACT_CATEGORY
         ]
         contacts = self.storage.sites_by_category(CONTACT_CATEGORY)
-        source_map = self.storage.source_urls_grouped()
         summary = self.storage.summary(min_score)
+
+        site_groups = self._group(sites)
+        new_groups = self._group(new_sites)
+        # 연락 채널은 묶지 않습니다. t.me/계정A 와 t.me/계정B 는 호스트가 같아도
+        # 서로 다른 채널이라 묶으면 한 줄로 뭉개집니다.
+        contact_groups = self._group(contacts, mode="url")
 
         workbook = Workbook()
         summary_sheet = workbook.active
         summary_sheet.title = "요약"
         self._write_summary_sheet(
-            summary_sheet, summary, len(sites), len(new_sites), len(contacts)
+            summary_sheet, summary, len(site_groups), len(new_groups), len(contact_groups),
+            url_count=len(sites),
         )
 
-        self._write_sites_sheet(workbook.create_sheet("불법사이트목록"), sites, source_map)
-        self._write_sites_sheet(workbook.create_sheet("신규_최근24시간"), new_sites, source_map)
-        self._write_sites_sheet(workbook.create_sheet("연락채널"), contacts, source_map)
+        self._write_sites_sheet(workbook.create_sheet("불법사이트목록"), site_groups)
+        self._write_sites_sheet(workbook.create_sheet("신규_최근24시간"), new_groups)
+        self._write_sites_sheet(workbook.create_sheet("연락채널"), contact_groups, mode="url")
         all_sources = self.storage.source_rows()
         approved = [row for row in all_sources if row["state"] == "approved"]
         candidates = [
@@ -541,17 +575,20 @@ class Exporter:
         snapshot = self._write_snapshot(saved_path) if not warning else None
 
         log.info(
-            "엑셀 저장 완료: %s (총 %d건 / 신규 %d건 / 연락채널 %d건)",
+            "엑셀 저장 완료: %s (%s 기준 %d건 / URL %d건 / 신규 %d건 / 연락채널 %d건)",
             saved_path,
+            GROUP_LABELS.get(self.group_mode, self.group_mode),
+            len(site_groups),
             len(sites),
-            len(new_sites),
-            len(contacts),
+            len(new_groups),
+            len(contact_groups),
         )
         return ExportResult(
             path=saved_path,
             snapshot=snapshot,
-            rows=len(sites),
-            new_rows=len(new_sites),
-            contacts=len(contacts),
+            rows=len(site_groups),
+            new_rows=len(new_groups),
+            contacts=len(contact_groups),
+            url_rows=len(sites),
             warning=warning,
         )
