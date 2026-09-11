@@ -18,6 +18,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from .classifier import Classifier
 from .config import Config
+from .discovery import Discovery
 from .extractor import Candidate, extract, extract_meta_redirect
 from .fetcher import Fetcher
 from .normalizer import normalize_url, registrable_domain, same_site
@@ -61,6 +62,7 @@ class Pipeline:
         fetcher: Fetcher,
         renderer: Renderer | None = None,
         pagination_patterns: tuple[str, ...] = (),
+        discovery: Discovery | None = None,
     ) -> None:
         self.config = config
         self.storage = storage
@@ -68,6 +70,7 @@ class Pipeline:
         self.fetcher = fetcher
         self.renderer = renderer
         self.pagination_patterns = pagination_patterns
+        self.discovery = discovery
         self._redirect_budget = 0
         self._budget_lock = threading.Lock()
 
@@ -199,7 +202,9 @@ class Pipeline:
         return outcome
 
     # -- 저장 (메인 스레드) -------------------------------------------------
-    def _persist(self, outcome: SourceOutcome, stats: RunStats) -> None:
+    def _persist(
+        self, outcome: SourceOutcome, stats: RunStats, source: SourceRow | None = None
+    ) -> None:
         rules = self.classifier.rules
         kept = 0
         seen_urls: set[str] = set()
@@ -215,6 +220,14 @@ class Pipeline:
             )
             if verdict.excluded:
                 continue
+
+            # 이 링크가 '또 다른 홍보사이트'인지도 함께 봅니다. 불법사이트 판별과
+            # 배타적이지 않습니다 - 홍보사이트는 도박 키워드를 잔뜩 달고 있어서
+            # 양쪽에 다 걸리는데, 2단계 평가에서 확정되면 그때 정리됩니다.
+            if self.discovery is not None and source is not None:
+                if self.discovery.consider(candidate, source):
+                    stats.candidates_added += 1
+
             if verdict.score < rules.candidate_threshold and not verdict.always_keep:
                 continue
 
@@ -292,6 +305,8 @@ class Pipeline:
             return stats
 
         self._redirect_budget = self.config.crawl.max_redirect_resolutions
+        if self.discovery is not None:
+            self.discovery.begin_cycle()
 
         needs_render = [
             source
@@ -325,7 +340,7 @@ class Pipeline:
                             status="예외",
                             error=f"{type(exc).__name__}: {exc}",
                         )
-                    self._persist(outcome, stats)
+                    self._persist(outcome, stats, source)
 
         # 2) 렌더링 필요한 사이트: Playwright 동기 API 제약으로 순차 처리
         for source in needs_render:
@@ -344,7 +359,7 @@ class Pipeline:
                     status="예외",
                     error=f"{type(exc).__name__}: {exc}",
                 )
-            self._persist(outcome, stats)
+            self._persist(outcome, stats, source)
 
         return stats
 

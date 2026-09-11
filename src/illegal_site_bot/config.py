@@ -50,6 +50,21 @@ DEFAULTS: dict[str, Any] = {
         "timeout_seconds": 10,
         "batch_size": 200,
     },
+    "discovery": {
+        "enabled": True,
+        "auto_approve": False,
+        "auto_approve_score": 75,
+        "queue_score": 40,
+        "max_depth": 2,
+        "max_new_per_cycle": 5,
+        "max_candidates_per_cycle": 50,
+        "max_total_sources": 500,
+        "max_evaluations_per_cycle": 20,
+        "max_evaluation_failures": 3,
+        "reevaluate_after_days": 30,
+        "auto_disable_after_failures": 10,
+        "mirror_similarity": 0.8,
+    },
     "export": {
         "directory": "data/exports",
         "filename": "불법사이트_URL목록.xlsx",
@@ -143,6 +158,23 @@ class AliveCheckConfig:
 
 
 @dataclass(frozen=True)
+class DiscoveryConfig:
+    enabled: bool
+    auto_approve: bool
+    auto_approve_score: int
+    queue_score: int
+    max_depth: int
+    max_new_per_cycle: int
+    max_candidates_per_cycle: int
+    max_total_sources: int
+    max_evaluations_per_cycle: int
+    max_evaluation_failures: int
+    reevaluate_after_days: int
+    auto_disable_after_failures: int
+    mirror_similarity: float
+
+
+@dataclass(frozen=True)
 class ExportConfig:
     directory: str
     filename: str
@@ -186,6 +218,7 @@ class Config:
     crawl: CrawlConfig
     renderer: RendererConfig
     alive_check: AliveCheckConfig
+    discovery: DiscoveryConfig
     export: ExportConfig
     storage: StorageConfig
     dashboard: DashboardConfig
@@ -253,6 +286,7 @@ def load_config(path: str | Path | None = None, root: Path | None = None) -> Con
         crawl=_build(CrawlConfig, merged["crawl"], "crawl"),
         renderer=_build(RendererConfig, merged["renderer"], "renderer"),
         alive_check=_build(AliveCheckConfig, merged["alive_check"], "alive_check"),
+        discovery=_build(DiscoveryConfig, merged["discovery"], "discovery"),
         export=_build(ExportConfig, merged["export"], "export"),
         storage=_build(StorageConfig, merged["storage"], "storage"),
         dashboard=_build(DashboardConfig, merged["dashboard"], "dashboard"),
@@ -280,6 +314,27 @@ def _validate(config: Config) -> None:
         raise ConfigError("export.min_score 는 0~100 범위여야 합니다.")
     if config.alive_check.every_cycles < 1:
         raise ConfigError("alive_check.every_cycles 는 1 이상이어야 합니다.")
+
+    discovery = config.discovery
+    if not 0 <= discovery.max_depth <= 5:
+        raise ConfigError(
+            "discovery.max_depth 는 0~5 범위여야 합니다. "
+            "3 이상은 수집 대상이 급격히 늘어나므로 권장하지 않습니다."
+        )
+    if not 0 <= discovery.queue_score <= 100:
+        raise ConfigError("discovery.queue_score 는 0~100 범위여야 합니다.")
+    if not 0 <= discovery.auto_approve_score <= 100:
+        raise ConfigError("discovery.auto_approve_score 는 0~100 범위여야 합니다.")
+    if discovery.auto_approve_score < discovery.queue_score:
+        raise ConfigError(
+            "discovery.auto_approve_score 는 queue_score 보다 크거나 같아야 합니다."
+        )
+    if discovery.max_total_sources < 1:
+        raise ConfigError("discovery.max_total_sources 는 1 이상이어야 합니다.")
+    if discovery.max_new_per_cycle < 0 or discovery.max_candidates_per_cycle < 0:
+        raise ConfigError("discovery 의 사이클당 상한은 0 이상이어야 합니다.")
+    if not 0 < discovery.mirror_similarity <= 1:
+        raise ConfigError("discovery.mirror_similarity 는 0 초과 1 이하여야 합니다.")
     if not 1 <= config.dashboard.port <= 65535:
         raise ConfigError("dashboard.port 는 1~65535 범위여야 합니다.")
     if config.dashboard.enabled and config.dashboard.host not in {

@@ -298,6 +298,52 @@ def extract(
     return result
 
 
+@dataclass
+class PageSignals:
+    """페이지의 성격을 가늠하는 신호들 (홍보사이트 판별 2단계에서 사용)."""
+
+    title: str = ""
+    headings: str = ""
+    meta_description: str = ""
+    text: str = ""
+    has_password_input: bool = False
+
+
+def extract_page_signals(html: str, max_text: int = 20_000) -> PageSignals:
+    """제목·헤딩·본문·로그인 폼 여부를 뽑습니다."""
+    signals = PageSignals()
+    if not html:
+        return signals
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+
+    if soup.title and soup.title.string:
+        signals.title = _clean(str(soup.title.string))
+
+    headings = [
+        tag.get_text(" ", strip=True) for tag in soup.find_all(["h1", "h2"], limit=10)
+    ]
+    signals.headings = _clean(" ".join(headings))
+
+    for tag in soup.find_all("meta"):
+        name = tag.get("name")
+        if isinstance(name, str) and name.lower() == "description":
+            signals.meta_description = _clean(tag.get("content"))
+            break
+
+    for tag in soup.find_all(["script", "style", "noscript"]):
+        tag.decompose()
+    signals.text = soup.get_text(" ", strip=True)[:max_text]
+
+    signals.has_password_input = any(
+        isinstance(tag.get("type"), str) and tag.get("type").lower() == "password"
+        for tag in soup.find_all("input")
+    )
+    return signals
+
+
 def extract_meta_redirect(html: str, source_url: str) -> str | None:
     """리다이렉트 경유 페이지에서 다음 목적지를 찾습니다 (meta refresh / JS 이동)."""
     if not html:

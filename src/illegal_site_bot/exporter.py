@@ -10,6 +10,7 @@ DB 에 남겨야 합니다(그러면 엑셀에도 계속 따라옵니다).
     신규_최근24시간    지난 24시간에 처음 발견된 것
     연락채널          텔레그램/카톡 등 접촉 채널
     홍보사이트_수집원  어디를 돌고 있는지 + 마지막 결과
+    홍보사이트_후보    봇이 새로 찾아낸 홍보사이트 (승인 대기/기각)
     실행이력          사이클별 통계
 """
 
@@ -85,6 +86,8 @@ SOURCE_COLUMNS: tuple[tuple[str, int], ...] = (
     ("번호", 6),
     ("홍보사이트 URL", 50),
     ("이름", 22),
+    ("출처", 7),
+    ("깊이", 6),
     ("사용", 7),
     ("렌더링", 8),
     ("최대 페이지", 11),
@@ -94,6 +97,19 @@ SOURCE_COLUMNS: tuple[tuple[str, int], ...] = (
     ("누적 수집", 10),
     ("마지막 오류", 40),
     ("비고", 24),
+)
+
+CANDIDATE_COLUMNS: tuple[tuple[str, int], ...] = (
+    ("번호", 6),
+    ("후보 URL", 50),
+    ("사이트 제목", 28),
+    ("상태", 12),
+    ("점수", 7),
+    ("깊이", 6),
+    ("판별 근거", 52),
+    ("발견 경로", 40),
+    ("발견 시각", 18),
+    ("평가 시각", 18),
 )
 
 RUN_COLUMNS: tuple[tuple[str, int], ...] = (
@@ -107,6 +123,8 @@ RUN_COLUMNS: tuple[tuple[str, int], ...] = (
     ("후보", 8),
     ("신규", 8),
     ("갱신", 8),
+    ("신규후보", 9),
+    ("자동승인", 9),
     ("비고", 40),
 )
 
@@ -234,26 +252,71 @@ class Exporter:
             _write_url(sheet, excel_row, 2, row["url"], False)
             sheet.cell(row=excel_row, column=3, value=row["name"])
             sheet.cell(
-                row=excel_row, column=4, value="ON" if row["enabled"] else "OFF"
+                row=excel_row, column=4, value="자동" if row["origin"] == "auto" else "수동"
+            ).alignment = Alignment(horizontal="center")
+            sheet.cell(row=excel_row, column=5, value=int(row["depth"] or 0)).alignment = (
+                Alignment(horizontal="center")
+            )
+            sheet.cell(
+                row=excel_row, column=6, value="ON" if row["enabled"] else "OFF"
             ).alignment = Alignment(horizontal="center")
             sheet.cell(
-                row=excel_row, column=5, value="예" if row["render"] else "-"
+                row=excel_row, column=7, value="예" if row["render"] else "-"
             ).alignment = Alignment(horizontal="center")
-            sheet.cell(row=excel_row, column=6, value=row["max_pages"]).alignment = Alignment(
+            sheet.cell(row=excel_row, column=8, value=row["max_pages"]).alignment = Alignment(
                 horizontal="center"
             )
-            sheet.cell(row=excel_row, column=7, value=local_str(row["last_crawled_at"]))
-            sheet.cell(row=excel_row, column=8, value=row["last_status"])
+            sheet.cell(row=excel_row, column=9, value=local_str(row["last_crawled_at"]))
+            sheet.cell(row=excel_row, column=10, value=row["last_status"])
             failures = int(row["consecutive_failures"])
-            failure_cell = sheet.cell(row=excel_row, column=9, value=failures)
+            failure_cell = sheet.cell(row=excel_row, column=11, value=failures)
             failure_cell.alignment = Alignment(horizontal="center")
             if failures >= 3:
                 failure_cell.fill = RISK_FILLS["높음"]
-            sheet.cell(row=excel_row, column=10, value=int(row["found_total"]))
-            sheet.cell(row=excel_row, column=11, value=row["last_error"]).alignment = Alignment(
+            sheet.cell(row=excel_row, column=12, value=int(row["found_total"]))
+            sheet.cell(row=excel_row, column=13, value=row["last_error"]).alignment = Alignment(
                 wrap_text=True, vertical="top"
             )
-            sheet.cell(row=excel_row, column=12, value=row["note"])
+            sheet.cell(row=excel_row, column=14, value=row["note"])
+
+    def _write_candidates_sheet(
+        self, sheet: Worksheet, rows: Sequence[sqlite3.Row], origin_map: dict[int, str]
+    ) -> None:
+        _style_header(sheet, CANDIDATE_COLUMNS)
+        state_text = {
+            "discovered": "평가 대기",
+            "pending": "승인 대기",
+            "rejected": "기각",
+            "auto_disabled": "자동 중지",
+        }
+        for index, row in enumerate(rows, start=1):
+            excel_row = index + 1
+            sheet.cell(row=excel_row, column=1, value=index).alignment = Alignment(
+                horizontal="center"
+            )
+            _write_url(sheet, excel_row, 2, row["url"], False)
+            sheet.cell(row=excel_row, column=3, value=row["name"])
+
+            state_cell = sheet.cell(
+                row=excel_row, column=4, value=state_text.get(row["state"], row["state"])
+            )
+            state_cell.alignment = Alignment(horizontal="center")
+            if row["state"] == "pending":
+                state_cell.fill = RISK_FILLS["보통"]
+
+            sheet.cell(row=excel_row, column=5, value=int(row["promo_score"] or 0)).alignment = (
+                Alignment(horizontal="center")
+            )
+            sheet.cell(row=excel_row, column=6, value=int(row["depth"] or 0)).alignment = (
+                Alignment(horizontal="center")
+            )
+            sheet.cell(row=excel_row, column=7, value=row["promo_reasons"]).alignment = (
+                Alignment(wrap_text=True, vertical="top")
+            )
+            origin = origin_map.get(row["discovered_from_id"], "") if row["discovered_from_id"] else ""
+            sheet.cell(row=excel_row, column=8, value=origin)
+            sheet.cell(row=excel_row, column=9, value=local_str(row["discovered_at"]))
+            sheet.cell(row=excel_row, column=10, value=local_str(row["evaluated_at"]))
 
     def _write_runs_sheet(self, sheet: Worksheet, rows: Sequence[sqlite3.Row]) -> None:
         _style_header(sheet, RUN_COLUMNS)
@@ -276,12 +339,14 @@ class Exporter:
                     "candidates_found",
                     "new_sites",
                     "updated_sites",
+                    "candidates_added",
+                    "sources_approved",
                 ),
                 start=4,
             ):
                 cell = sheet.cell(row=excel_row, column=offset, value=int(row[key] or 0))
                 cell.alignment = Alignment(horizontal="center")
-            sheet.cell(row=excel_row, column=11, value=row["note"])
+            sheet.cell(row=excel_row, column=13, value=row["note"])
 
     def _write_summary_sheet(
         self,
@@ -311,8 +376,12 @@ class Exporter:
             ("접속 불가", int(summary.get("dead") or 0)),
             ("생존 미확인", int(summary.get("unchecked") or 0)),
             ("신고 완료 처리", int(summary.get("reported") or 0)),
+            ("제외 처리(오탐/홍보사이트 재분류)", int(summary.get("ignored") or 0)),
             ("연락 채널(텔레그램 등)", contacts),
             ("홍보사이트 등록/사용", f"{summary.get('sources_total', 0)} / {summary.get('sources_enabled', 0)}"),
+            ("  그중 자동 발견", int(summary.get("sources_auto") or 0)),
+            ("승인 대기 후보", int(summary.get("candidates_pending") or 0)),
+            ("평가 대기 후보", int(summary.get("candidates_discovered") or 0)),
         ]
         if last_run is not None:
             duration = last_run["duration_ms"]
@@ -425,10 +494,14 @@ class Exporter:
     def export(self) -> ExportResult:
         """현재 DB 내용을 엑셀 파일로 씁니다."""
         min_score = self.config.export.min_score
-        sites = self.storage.sites_for_export(min_score, categories_excluded=(CONTACT_CATEGORY,))
+        sites = self.storage.sites_for_export(
+            min_score, categories_excluded=(CONTACT_CATEGORY,), include_ignored=False
+        )
         new_sites = [
             row
-            for row in self.storage.sites_first_seen_since(days_ago(1), min_score)
+            for row in self.storage.sites_first_seen_since(
+                days_ago(1), min_score, include_ignored=False
+            )
             if row["category"] != CONTACT_CATEGORY
         ]
         contacts = self.storage.sites_by_category(CONTACT_CATEGORY)
@@ -445,7 +518,22 @@ class Exporter:
         self._write_sites_sheet(workbook.create_sheet("불법사이트목록"), sites, source_map)
         self._write_sites_sheet(workbook.create_sheet("신규_최근24시간"), new_sites, source_map)
         self._write_sites_sheet(workbook.create_sheet("연락채널"), contacts, source_map)
-        self._write_sources_sheet(workbook.create_sheet("홍보사이트_수집원"), self.storage.source_rows())
+        all_sources = self.storage.source_rows()
+        approved = [row for row in all_sources if row["state"] == "approved"]
+        candidates = [
+            row
+            for row in all_sources
+            if row["state"] in {"discovered", "pending", "rejected", "auto_disabled"}
+        ]
+        candidates.sort(
+            key=lambda row: (row["state"] != "pending", -int(row["promo_score"] or 0))
+        )
+        origin_map = {int(row["id"]): row["url"] for row in all_sources}
+
+        self._write_sources_sheet(workbook.create_sheet("홍보사이트_수집원"), approved)
+        self._write_candidates_sheet(
+            workbook.create_sheet("홍보사이트_후보"), candidates, origin_map
+        )
         self._write_runs_sheet(workbook.create_sheet("실행이력"), self.storage.recent_runs(100))
 
         target = self.config.export_path

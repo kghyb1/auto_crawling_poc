@@ -35,6 +35,9 @@ PROMO_INDEX = """<!doctype html>
     <a href="/assets/logo.png"><img src="/assets/logo.png" alt="로고"></a>
   </div>
   <p>먹튀 없는 무료야동 새 주소 안내: freeya-dong[.]com 으로 접속하세요.</p>
+  <div class="partners">
+    <a href="{PARTNER_URL}">제휴 먹튀검증 커뮤니티</a>
+  </div>
   <iframe src="https://plain-ad-frame.example/frame"></iframe>
   <a href="/board/list?page=2">다음 페이지</a>
   <script>var target = "https://webtoon24-free.site/";</script>
@@ -47,6 +50,62 @@ PROMO_PAGE2 = """<!doctype html>
   <a href="https://baccarat-vip-365.club/"><img alt="바카라 VIP 365 첫충 이벤트"></a>
 </body></html>
 """
+
+
+# 발견 대상이 되는 "두 번째 홍보사이트". 이미 수집된 불법 도메인들을 링크하므로
+# 2단계 평가의 A 신호(아는 불법 도메인과의 겹침)가 강하게 나옵니다.
+PARTNER_INDEX = """<!doctype html>
+<html><head><title>먹튀검증 커뮤니티 - 보증업체 순위</title></head>
+<body>
+  <h1>먹튀검증 보증업체 순위</h1>
+  <div class="banners">
+    <a href="https://casino-abc777.xyz/"><img alt="ABC777 카지노"></a>
+    <a href="http://toto-safe-999.top/"><img alt="토토 안전놀이터"></a>
+    <a href="https://slot-yamato-55.vip/"><img alt="야마토 슬롯"></a>
+    <a href="https://holdem-king.cc/"><img alt="홀덤"></a>
+    <a href="https://baccarat-vip-365.club/"><img alt="바카라"></a>
+    <a href="https://newly-found-casino-42.top/"><img alt="신규 카지노 42"></a>
+  </div>
+</body></html>
+"""
+
+# 홍보사이트가 아니라 "불법사이트 본체"로 보이는 페이지 (역신호 확인용)
+LANDING_PAGE = """<!doctype html>
+<html><head><title>ABC777 카지노</title></head>
+<body>
+  <h1>로그인</h1>
+  <form>
+    <input type="text" name="id" placeholder="아이디">
+    <input type="password" name="pw" placeholder="비밀번호">
+    <button>로그인</button>
+  </form>
+  <a href="https://t.me/abc777_help">고객센터</a>
+</body></html>
+"""
+
+
+class _PartnerHandler(BaseHTTPRequestHandler):
+    """두 번째 홍보사이트 + 불법사이트 본체 흉내."""
+
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_args: object) -> None:
+        return
+
+    def _respond(self, body: bytes, status: int = 200) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path.startswith("/landing"):
+            self._respond(LANDING_PAGE.encode("utf-8"))
+        elif self.path in {"/", "/index.html"}:
+            self._respond(PARTNER_INDEX.encode("utf-8"))
+        else:
+            self._respond(b"not found", status=404)
 
 
 class _PromoHandler(BaseHTTPRequestHandler):
@@ -68,7 +127,10 @@ class _PromoHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/board/list?page=2"):
             self._respond(PROMO_PAGE2.encode("utf-8"))
         elif self.path in {"/", "/index.html"}:
-            self._respond(PROMO_INDEX.encode("utf-8"))
+            page = PROMO_INDEX.replace(
+                "{PARTNER_URL}", getattr(self, "partner_url", "https://partner-promo.test/")
+            )
+            self._respond(page.encode("utf-8"))
         elif self.path == "/robots.txt":
             self._respond(b"not found", status=404, content_type="text/plain")
         else:
@@ -76,8 +138,39 @@ class _PromoHandler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture(scope="session")
-def promo_server():
+def partner_server():
+    """발견 대상이 되는 두 번째 홍보사이트 (다른 호스트로 띄웁니다)."""
+    server = ThreadingHTTPServer(("127.0.0.2", 0), _PartnerHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    try:
+        yield f"http://{host}:{port}/"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture(scope="session")
+def mirror_server():
+    """두 번째 홍보사이트와 내용이 같은 복제(미러) 사이트."""
+    server = ThreadingHTTPServer(("127.0.0.3", 0), _PartnerHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    try:
+        yield f"http://{host}:{port}/"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture(scope="session")
+def promo_server(partner_server):
     """가짜 홍보사이트 주소(예: ``http://127.0.0.1:PORT/``)를 돌려줍니다."""
+    _PromoHandler.partner_url = partner_server
     server = ThreadingHTTPServer(("127.0.0.1", 0), _PromoHandler)
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, daemon=True)

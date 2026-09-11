@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 from .classifier import CONTACT_CATEGORY, Classifier
 from .config import Config
 from .control import Control
+from .normalizer import normalize_url, registrable_domain
 from .storage import Storage
 from .timeutil import days_ago, humanize_duration, local_str, now_utc, parse_iso
 
@@ -104,6 +105,17 @@ _PAGE = """<!doctype html>
     <div class="kv" id="runtime"></div>
   </div>
 
+  <div class="card" id="candidateCard" hidden>
+    <h1 style="font-size:15px">홍보사이트 후보 — 승인 대기 <span id="candCount"></span></h1>
+    <div class="sub" style="margin:2px 0 10px">
+      봇이 수집 중에 찾아낸 다른 홍보사이트입니다. 승인하면 다음 사이클부터 수집합니다.
+    </div>
+    <table>
+      <thead><tr><th>URL</th><th>점수</th><th>깊이</th><th>판별 근거</th><th></th></tr></thead>
+      <tbody id="candidates"></tbody>
+    </table>
+  </div>
+
   <div class="card">
     <h1 style="font-size:15px">최근 발견 (최신 20건)</h1>
     <table>
@@ -140,6 +152,18 @@ async function act(path, label) {
   }
 }
 
+async function review(url, decision) {
+  const label = decision === "approve" ? "승인" : "기각";
+  $("msg").textContent = `${label} 처리 중…`;
+  try {
+    const data = await api(`/api/${decision}?url=${encodeURIComponent(url)}`, "POST");
+    $("msg").textContent = data.message || `${label} 완료`;
+    await refresh();
+  } catch (err) {
+    $("msg").textContent = `${label} 실패: ` + err.message;
+  }
+}
+
 function render(d) {
   $("host").textContent = `${d.host} · DB ${d.database} · 엑셀 ${d.export_path}`;
   const running = d.process_alive;
@@ -159,6 +183,23 @@ function render(d) {
     `<div class="stat"><b>${esc(s.value)}</b><span>${esc(s.label)}</span></div>`).join("");
   $("runtime").innerHTML = d.runtime.map(([k, v]) =>
     `<div>${esc(k)}</div><div>${esc(v)}</div>`).join("");
+  const cands = d.candidates || [];
+  $("candidateCard").hidden = cands.length === 0;
+  $("candCount").textContent = cands.length ? `(${cands.length}건)` : "";
+  $("candidates").innerHTML = cands.map(c => `<tr>
+      <td class="url">${esc(c.url)}${c.name ? "<br><span style='color:var(--muted)'>" + esc(c.name) + "</span>" : ""}</td>
+      <td>${esc(c.score)}</td>
+      <td>${esc(c.depth)}</td>
+      <td style="color:var(--muted)">${esc(c.reasons || "-")}</td>
+      <td style="white-space:nowrap">
+        <button class="primary" data-approve="${esc(c.url)}">승인</button>
+        <button data-reject="${esc(c.url)}">기각</button>
+      </td></tr>`).join("");
+  $("candidates").querySelectorAll("[data-approve]").forEach(b =>
+    b.onclick = () => review(b.getAttribute("data-approve"), "approve"));
+  $("candidates").querySelectorAll("[data-reject]").forEach(b =>
+    b.onclick = () => review(b.getAttribute("data-reject"), "reject"));
+
   $("recent").innerHTML = d.recent.length
     ? d.recent.map(r => `<tr>
         <td class="url">${esc(r.url)}</td>
@@ -230,6 +271,17 @@ def _status_payload(state: DashboardState) -> dict[str, Any]:
         if row["category"] != CONTACT_CATEGORY
     ]
 
+    candidates = [
+        {
+            "url": row["url"],
+            "name": row["name"],
+            "score": int(row["promo_score"] or 0),
+            "depth": int(row["depth"] or 0),
+            "reasons": row["promo_reasons"],
+        }
+        for row in storage.sources_by_state("pending")[:20]
+    ]
+
     uptime = ""
     if process is not None:
         started = parse_iso(process.started_at)
@@ -254,6 +306,7 @@ def _status_payload(state: DashboardState) -> dict[str, Any]:
                 "label": "홍보사이트(사용/등록)",
                 "value": f"{summary.get('sources_enabled', 0)}/{summary.get('sources_total', 0)}",
             },
+            {"label": "승인 대기 후보", "value": int(summary.get("candidates_pending") or 0)},
         ],
         "runtime": [
             ["프로세스", f"PID {process.pid} (가동 {uptime})" if process else "실행 중이 아님"],
@@ -267,10 +320,16 @@ def _status_payload(state: DashboardState) -> dict[str, Any]:
                 f"/ 대상 {last_cycle.get('sources_ok', 0)}곳 성공, {last_cycle.get('sources_failed', 0)}곳 실패 "
                 f"({humanize_duration(last_cycle.get('duration_seconds'))})",
             ],
+            [
+                "자동 발견",
+                f"승인된 수집원 중 {summary.get('sources_auto', 0)}곳이 자동 발견"
+                f" / 지난 사이클 신규 후보 {last_cycle.get('candidates_added', 0)}건",
+            ],
             ["마지막 엑셀", last_cycle.get("export_path") or "-"],
             ["마지막 오류", last_cycle.get("error") or "없음"],
         ],
         "recent": recent,
+        "candidates": candidates,
     }
 
 
@@ -332,6 +391,35 @@ class _Handler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         self.do_GET()
 
+    def _handle_review(self, path: str, query: dict[str, list[str]]) -> None:
+        """홍보사이트 후보 승인/기각."""
+        raw_url = (query.get("url") or [""])[0]
+        target = normalize_url(raw_url)
+        if not target:
+            self._send_text("url 파라미터가 필요합니다.", HTTPStatus.BAD_REQUEST)
+            return
+
+        approving = path == "/api/approve"
+        state = "approved" if approving else "rejected"
+        try:
+            updated = self.state.storage.review_source(target, state, by="대시보드")
+        except Exception as exc:
+            log.exception("후보 검토 처리 실패 %s", target)
+            self._send_text(f"처리 실패: {exc}", HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        if not updated:
+            self._send_text("후보 목록에 없는 주소입니다.", HTTPStatus.NOT_FOUND)
+            return
+
+        if approving:
+            self.state.storage.reclassify_site_as_promo(registrable_domain(target))
+            message = f"승인했습니다. 다음 사이클부터 수집합니다: {target}"
+        else:
+            message = f"기각했습니다: {target}"
+        log.info("대시보드에서 후보를 %s: %s", "승인" if approving else "기각", target)
+        self._send_json({"ok": True, "message": message})
+
     def do_POST(self) -> None:  # noqa: N802
         parts = urlsplit(self.path)
         query = parse_qs(parts.query)
@@ -358,6 +446,11 @@ class _Handler(BaseHTTPRequestHandler):
                 "엑셀 재생성을 요청했습니다.",
             )[1],
         }
+
+        # 후보 승인/기각은 URL 을 함께 받습니다.
+        if parts.path in {"/api/approve", "/api/reject"}:
+            self._handle_review(parts.path, query)
+            return
 
         action = actions.get(parts.path)
         if action is None:

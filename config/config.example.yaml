@@ -56,6 +56,33 @@ alive_check:
   # 한 번에 확인할 사이트 수 (오래된 확인 순서로)
   batch_size: 200
 
+discovery:
+  # 수집 중에 발견한 "다른 홍보사이트"를 수집 대상에 자동으로 추가합니다.
+  # 이게 있어야 24시간 돌리는 동안 수집 범위가 스스로 넓어집니다.
+  enabled: true
+
+  # true 로 하면 사람 확인 없이 바로 수집 대상이 됩니다.
+  # 처음에는 false 로 두고 `python bot.py candidates` 로 며칠 지켜보세요.
+  # 판별 정확도는 수집된 불법사이트가 쌓일수록 좋아집니다(아래 설명 참고).
+  auto_approve: false
+  auto_approve_score: 75   # 이 점수 이상이면 자동 승인 (auto_approve: true 일 때만)
+  queue_score: 40          # 이 점수 이상이면 승인 대기열에 올림. 미만은 기각
+
+  # 탐색 깊이. 수동 등록한 시드가 0, 거기서 발견한 곳이 1, 또 거기서가 2.
+  # 2 를 넘기면 수집 대상이 급격히 늘고 처음 시드와의 연관성도 옅어집니다.
+  max_depth: 2
+
+  # 폭주 방지 상한
+  max_new_per_cycle: 5           # 한 사이클에 자동 승인할 수 있는 최대 개수
+  max_candidates_per_cycle: 50   # 한 사이클에 새로 등록할 후보 수
+  max_total_sources: 500         # 홍보사이트 전체 상한 (도달하면 발견 중단)
+  max_evaluations_per_cycle: 20  # 후보 평가에 쓸 HTTP 요청 예산
+  max_evaluation_failures: 3     # 평가용 접속이 이만큼 실패하면 기각
+
+  reevaluate_after_days: 30      # 기각한 후보를 다시 평가하기까지의 기간
+  auto_disable_after_failures: 10  # 연속 실패가 이만큼이면 수집에서 자동 제외
+  mirror_similarity: 0.8         # 링크 구성이 이만큼 겹치면 복제 사이트로 보고 제외
+
 export:
   directory: "data/exports"
   filename: "불법사이트_URL목록.xlsx"

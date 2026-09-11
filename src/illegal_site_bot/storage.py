@@ -19,9 +19,20 @@ from .timeutil import days_ago, iso_now
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SITE_STATUSES = ("new", "confirmed", "reported", "ignored")
+
+#: 홍보사이트(수집원)의 생애 주기
+#:   discovered  봇이 찾아냈지만 아직 평가하지 않음
+#:   pending     평가까지 끝나고 사람 승인을 기다리는 중
+#:   approved    수집 대상 (enabled 가 1 이면 실제로 돌기 시작)
+#:   rejected    홍보사이트가 아니라고 판단 (일정 기간 뒤 재평가)
+#:   auto_disabled  연속 실패가 많아 자동으로 내려둠
+SOURCE_STATES = ("discovered", "pending", "approved", "rejected", "auto_disabled")
+
+#: 수집 사이클이 실제로 도는 상태
+CRAWLABLE_STATE = "approved"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_info (
@@ -41,7 +52,21 @@ CREATE TABLE IF NOT EXISTS sources (
     last_status          TEXT NOT NULL DEFAULT '',
     last_error           TEXT NOT NULL DEFAULT '',
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
-    found_total          INTEGER NOT NULL DEFAULT 0
+    found_total          INTEGER NOT NULL DEFAULT 0,
+    -- 아래는 스키마 v2(홍보사이트 자동 발견)에서 추가된 컬럼입니다.
+    state                TEXT NOT NULL DEFAULT 'approved',
+    origin               TEXT NOT NULL DEFAULT 'manual',
+    discovered_from_id   INTEGER,
+    depth                INTEGER NOT NULL DEFAULT 0,
+    promo_score          INTEGER NOT NULL DEFAULT 0,
+    promo_reasons        TEXT NOT NULL DEFAULT '',
+    discovered_at        TEXT,
+    evaluated_at         TEXT,
+    evaluation_failures  INTEGER NOT NULL DEFAULT 0,
+    reviewed_at          TEXT,
+    reviewed_by          TEXT NOT NULL DEFAULT '',
+    link_domains         TEXT NOT NULL DEFAULT '',
+    mirror_of_id         INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS sites (
@@ -102,9 +127,42 @@ CREATE TABLE IF NOT EXISTS runs (
     new_sites        INTEGER NOT NULL DEFAULT 0,
     updated_sites    INTEGER NOT NULL DEFAULT 0,
     duration_ms      INTEGER,
-    note             TEXT NOT NULL DEFAULT ''
+    note             TEXT NOT NULL DEFAULT '',
+    candidates_added INTEGER NOT NULL DEFAULT 0,
+    sources_approved INTEGER NOT NULL DEFAULT 0
 );
 """
+
+#: v2 컬럼을 만든 *뒤에* 걸어야 하는 인덱스.
+#: v1 DB 에는 아직 state 컬럼이 없으므로 _SCHEMA 에 넣으면 마이그레이션이 깨집니다.
+_V2_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_sources_state ON sources(state);
+"""
+
+#: 스키마 v1 로 만들어진 DB 를 v2 로 올릴 때 추가해야 하는 컬럼.
+#: 기존 행은 DEFAULT 값으로 채워지므로(수동 등록 = approved/manual/depth 0)
+#: 사용자가 쓰던 DB 를 지우지 않고 그대로 이어서 쓸 수 있습니다.
+_V2_COLUMNS: dict[str, dict[str, str]] = {
+    "sources": {
+        "state": "TEXT NOT NULL DEFAULT 'approved'",
+        "origin": "TEXT NOT NULL DEFAULT 'manual'",
+        "discovered_from_id": "INTEGER",
+        "depth": "INTEGER NOT NULL DEFAULT 0",
+        "promo_score": "INTEGER NOT NULL DEFAULT 0",
+        "promo_reasons": "TEXT NOT NULL DEFAULT ''",
+        "discovered_at": "TEXT",
+        "evaluated_at": "TEXT",
+        "evaluation_failures": "INTEGER NOT NULL DEFAULT 0",
+        "reviewed_at": "TEXT",
+        "reviewed_by": "TEXT NOT NULL DEFAULT ''",
+        "link_domains": "TEXT NOT NULL DEFAULT ''",
+        "mirror_of_id": "INTEGER",
+    },
+    "runs": {
+        "candidates_added": "INTEGER NOT NULL DEFAULT 0",
+        "sources_approved": "INTEGER NOT NULL DEFAULT 0",
+    },
+}
 
 
 @dataclass
@@ -118,9 +176,14 @@ class SourceRow:
     render: bool
     max_pages: int | None
     note: str
+    state: str = CRAWLABLE_STATE
+    origin: str = "manual"
+    depth: int = 0
+    promo_score: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "SourceRow":
+        keys = row.keys()
         return cls(
             id=row["id"],
             url=row["url"],
@@ -129,6 +192,10 @@ class SourceRow:
             render=bool(row["render"]),
             max_pages=row["max_pages"],
             note=row["note"],
+            state=row["state"] if "state" in keys else CRAWLABLE_STATE,
+            origin=row["origin"] if "origin" in keys else "manual",
+            depth=int(row["depth"] or 0) if "depth" in keys else 0,
+            promo_score=int(row["promo_score"] or 0) if "promo_score" in keys else 0,
         )
 
 
@@ -143,6 +210,8 @@ class RunStats:
     candidates_found: int = 0
     new_sites: int = 0
     updated_sites: int = 0
+    candidates_added: int = 0
+    sources_approved: int = 0
     note: str = ""
 
 
@@ -161,19 +230,52 @@ class Storage:
         self._migrate()
 
     # -- 기본 --------------------------------------------------------------
+    def _existing_columns(self, table: str) -> set[str]:
+        return {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+
+    def _ensure_columns(self, table: str, columns: dict[str, str]) -> list[str]:
+        """없는 컬럼만 ALTER TABLE 로 추가하고, 추가한 컬럼 이름을 돌려줍니다."""
+        present = self._existing_columns(table)
+        added: list[str] = []
+        for name, definition in columns.items():
+            if name in present:
+                continue
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+            added.append(f"{table}.{name}")
+        return added
+
     def _migrate(self) -> None:
         with self._lock:
             self._conn.executescript(_SCHEMA)
+
             row = self._conn.execute("SELECT version FROM schema_info").fetchone()
-            if row is None:
+            current = int(row["version"]) if row is not None else None
+
+            if current is not None and current > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"DB 스키마 버전({current})이 이 프로그램({SCHEMA_VERSION})보다 "
+                    "높습니다. 봇을 최신 버전으로 업데이트하세요."
+                )
+
+            # v1 로 만들어진 기존 DB 에 v2 컬럼을 채워 넣습니다.
+            # CREATE TABLE IF NOT EXISTS 는 이미 있는 테이블을 바꾸지 않기 때문에
+            # 여기서 따로 처리해야 합니다.
+            added: list[str] = []
+            for table, columns in _V2_COLUMNS.items():
+                added.extend(self._ensure_columns(table, columns))
+            if added:
+                log.info("DB 스키마를 v%d 로 올렸습니다: %s", SCHEMA_VERSION, ", ".join(added))
+
+            # 컬럼이 모두 갖춰진 뒤에 인덱스를 겁니다.
+            self._conn.executescript(_V2_INDEXES)
+
+            if current is None:
                 self._conn.execute(
                     "INSERT INTO schema_info (version) VALUES (?)", (SCHEMA_VERSION,)
                 )
-            elif row["version"] > SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"DB 스키마 버전({row['version']})이 이 프로그램({SCHEMA_VERSION})보다 "
-                    "높습니다. 봇을 최신 버전으로 업데이트하세요."
-                )
+            elif current < SCHEMA_VERSION:
+                self._conn.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
+
             self._conn.commit()
 
     def close(self) -> None:
@@ -208,7 +310,11 @@ class Storage:
         note: str = "",
         update_existing: bool = True,
     ) -> int:
-        """홍보사이트를 등록하거나 갱신하고 id 를 돌려줍니다."""
+        """홍보사이트를 사람이 등록하거나 갱신하고 id 를 돌려줍니다.
+
+        봇이 찾아둔 후보를 이 방법으로 등록하면 **depth 0 시드로 승격**됩니다.
+        거기서부터 다시 max_depth 만큼 탐색이 뻗어나갑니다.
+        """
         with self._lock:
             row = self._conn.execute(
                 "SELECT id FROM sources WHERE url = ?", (url,)
@@ -216,10 +322,21 @@ class Storage:
             if row is None:
                 cursor = self._conn.execute(
                     """
-                    INSERT INTO sources (url, name, enabled, render, max_pages, note, added_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO sources (
+                        url, name, enabled, render, max_pages, note, added_at,
+                        state, origin, depth
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'manual', 0)
                     """,
-                    (url, name, int(enabled), int(render), max_pages, note, iso_now()),
+                    (
+                        url,
+                        name,
+                        int(enabled),
+                        int(render),
+                        max_pages,
+                        note,
+                        iso_now(),
+                        CRAWLABLE_STATE,
+                    ),
                 )
                 self._conn.commit()
                 return int(cursor.lastrowid)
@@ -228,30 +345,308 @@ class Storage:
                 self._conn.execute(
                     """
                     UPDATE sources
-                       SET name = ?, enabled = ?, render = ?, max_pages = ?, note = ?
+                       SET name = ?, enabled = ?, render = ?, max_pages = ?, note = ?,
+                           state = ?, origin = 'manual', depth = 0,
+                           reviewed_at = ?, reviewed_by = 'manual'
                      WHERE id = ?
                     """,
-                    (name, int(enabled), int(render), max_pages, note, row["id"]),
+                    (
+                        name,
+                        int(enabled),
+                        int(render),
+                        max_pages,
+                        note,
+                        CRAWLABLE_STATE,
+                        iso_now(),
+                        row["id"],
+                    ),
                 )
                 self._conn.commit()
             return int(row["id"])
 
     def list_sources(self, enabled_only: bool = False) -> list[SourceRow]:
+        """홍보사이트 목록. ``enabled_only`` 면 실제로 수집을 도는 것만."""
         sql = "SELECT * FROM sources"
+        params: list[Any] = []
         if enabled_only:
-            sql += " WHERE enabled = 1"
+            sql += " WHERE enabled = 1 AND state = ?"
+            params.append(CRAWLABLE_STATE)
         sql += " ORDER BY id"
-        return [SourceRow.from_row(row) for row in self._query(sql)]
+        return [SourceRow.from_row(row) for row in self._query(sql, params)]
 
     def source_rows(self) -> list[sqlite3.Row]:
         """엑셀 출력용 전체 컬럼."""
         return self._query("SELECT * FROM sources ORDER BY id")
 
-    def count_sources(self, enabled_only: bool = False) -> int:
+    def count_sources(self, enabled_only: bool = False, state: str | None = None) -> int:
+        """홍보사이트 개수.
+
+        기본값은 '승인된 것'만 셉니다. 발견 단계의 후보까지 섞어 세면
+        엑셀/대시보드의 수집원 숫자가 부풀어 보이기 때문입니다.
+        """
         sql = "SELECT COUNT(*) AS n FROM sources"
+        params: list[Any] = []
         if enabled_only:
-            sql += " WHERE enabled = 1"
-        return int(self._query(sql)[0]["n"])
+            sql += " WHERE enabled = 1 AND state = ?"
+            params.append(CRAWLABLE_STATE)
+        elif state is not None:
+            sql += " WHERE state = ?"
+            params.append(state)
+        else:
+            sql += " WHERE state = ?"
+            params.append(CRAWLABLE_STATE)
+        return int(self._query(sql, params)[0]["n"])
+
+    def count_sources_all_states(self) -> int:
+        """후보까지 포함한 전체 행 수 (총량 상한 검사용)."""
+        return int(self._query("SELECT COUNT(*) AS n FROM sources")[0]["n"])
+
+    # -- 홍보사이트 자동 발견 ----------------------------------------------
+    def add_candidate(
+        self,
+        url: str,
+        *,
+        name: str = "",
+        discovered_from_id: int | None,
+        depth: int,
+        note: str = "",
+    ) -> int | None:
+        """새로 발견한 홍보사이트 후보를 등록합니다.
+
+        이미 있는 주소면 ``None`` 을 돌려주되, 더 짧은 경로로 발견된 경우
+        depth 만 낮춰 갱신합니다.
+        """
+        now = iso_now()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, depth FROM sources WHERE url = ?", (url,)
+            ).fetchone()
+            if row is not None:
+                if depth < int(row["depth"] or 0):
+                    self._conn.execute(
+                        "UPDATE sources SET depth = ?, discovered_from_id = ? WHERE id = ?",
+                        (depth, discovered_from_id, row["id"]),
+                    )
+                    self._conn.commit()
+                return None
+
+            cursor = self._conn.execute(
+                """
+                INSERT INTO sources (
+                    url, name, enabled, render, note, added_at,
+                    state, origin, discovered_from_id, depth, discovered_at
+                ) VALUES (?, ?, 0, 0, ?, ?, 'discovered', 'auto', ?, ?, ?)
+                """,
+                (url, name, note, now, discovered_from_id, depth, now),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+
+    def source_by_id(self, source_id: int) -> sqlite3.Row | None:
+        rows = self._query("SELECT * FROM sources WHERE id = ?", (source_id,))
+        return rows[0] if rows else None
+
+    def source_by_url(self, url: str) -> sqlite3.Row | None:
+        rows = self._query("SELECT * FROM sources WHERE url = ?", (url,))
+        return rows[0] if rows else None
+
+    def sources_by_state(self, *states: str) -> list[sqlite3.Row]:
+        if not states:
+            return []
+        placeholders = ", ".join("?" for _ in states)
+        return self._query(
+            f"""
+            SELECT * FROM sources
+             WHERE state IN ({placeholders})
+             ORDER BY promo_score DESC, discovered_at ASC, id ASC
+            """,
+            states,
+        )
+
+    def sources_to_evaluate(self, limit: int, reevaluate_before: str | None) -> list[sqlite3.Row]:
+        """평가 대기 중인 후보. 아직 안 본 것 먼저, 그다음 재평가 대상."""
+        rows = self._query(
+            """
+            SELECT * FROM sources
+             WHERE state = 'discovered'
+             ORDER BY depth ASC, discovered_at ASC
+             LIMIT ?
+            """,
+            (limit,),
+        )
+        if len(rows) >= limit or not reevaluate_before:
+            return rows[:limit]
+
+        rows.extend(
+            self._query(
+                """
+                SELECT * FROM sources
+                 WHERE state = 'rejected'
+                   AND (evaluated_at IS NULL OR evaluated_at < ?)
+                 ORDER BY evaluated_at ASC
+                 LIMIT ?
+                """,
+                (reevaluate_before, limit - len(rows)),
+            )
+        )
+        return rows
+
+    def record_evaluation(
+        self,
+        source_id: int,
+        *,
+        state: str,
+        promo_score: int,
+        promo_reasons: str,
+        link_domains: str = "",
+        mirror_of_id: int | None = None,
+        name: str = "",
+    ) -> None:
+        """2단계 평가 결과를 기록합니다. 승인이면 바로 수집 대상이 됩니다."""
+        if state not in SOURCE_STATES:
+            raise ValueError(f"state 는 {SOURCE_STATES} 중 하나여야 합니다.")
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE sources
+                   SET state = ?, promo_score = ?, promo_reasons = ?,
+                       link_domains = ?, mirror_of_id = ?, evaluated_at = ?,
+                       enabled = CASE WHEN ? = 'approved' THEN 1 ELSE enabled END,
+                       name = CASE WHEN name = '' AND ? <> '' THEN ? ELSE name END
+                 WHERE id = ?
+                """,
+                (
+                    state,
+                    promo_score,
+                    promo_reasons,
+                    link_domains,
+                    mirror_of_id,
+                    iso_now(),
+                    state,
+                    name,
+                    name,
+                    source_id,
+                ),
+            )
+            self._conn.commit()
+
+    def record_evaluation_failure(self, source_id: int, max_failures: int) -> int:
+        """평가용 접속이 실패했을 때. 누적 실패가 한도를 넘으면 기각합니다."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sources SET evaluation_failures = evaluation_failures + 1 WHERE id = ?",
+                (source_id,),
+            )
+            row = self._conn.execute(
+                "SELECT evaluation_failures FROM sources WHERE id = ?", (source_id,)
+            ).fetchone()
+            failures = int(row["evaluation_failures"] if row else 0)
+            if failures >= max_failures:
+                self._conn.execute(
+                    """
+                    UPDATE sources
+                       SET state = 'rejected', evaluated_at = ?,
+                           promo_reasons = '평가용 접속 실패가 반복됨'
+                     WHERE id = ?
+                    """,
+                    (iso_now(), source_id),
+                )
+            self._conn.commit()
+            return failures
+
+    def review_source(self, url: str, state: str, by: str = "cli", note: str = "") -> bool:
+        """사람이 후보를 승인/거부합니다."""
+        if state not in SOURCE_STATES:
+            raise ValueError(f"state 는 {SOURCE_STATES} 중 하나여야 합니다.")
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                UPDATE sources
+                   SET state = ?, reviewed_at = ?, reviewed_by = ?,
+                       enabled = CASE WHEN ? = 'approved' THEN 1 ELSE 0 END,
+                       note = CASE WHEN ? <> '' THEN ? ELSE note END
+                 WHERE url = ?
+                """,
+                (state, iso_now(), by, state, note, note, url),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
+
+    def known_illegal_domains(self, domains: Sequence[str]) -> set[str]:
+        """주어진 도메인 중 이미 불법사이트로 기록된 것 (2단계 평가의 A 신호)."""
+        if not domains:
+            return set()
+        unique = list({domain for domain in domains if domain})
+        found: set[str] = set()
+        # SQLite 의 변수 개수 제한(기본 999)을 넘지 않도록 나눠서 조회합니다.
+        for start in range(0, len(unique), 500):
+            chunk = unique[start : start + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._query(
+                f"SELECT DISTINCT domain FROM sites WHERE domain IN ({placeholders})", chunk
+            )
+            found.update(row["domain"] for row in rows)
+        return found
+
+    def source_domains(self) -> set[str]:
+        """등록된(후보 포함) 홍보사이트의 등록가능도메인 집합."""
+        rows = self._query("SELECT url FROM sources")
+        return {registrable_domain(row["url"]) for row in rows}
+
+    def link_domain_sets(self, exclude_id: int) -> list[tuple[int, str, set[str]]]:
+        """미러 판정을 위해 다른 홍보사이트의 외부 링크 도메인 집합을 가져옵니다."""
+        rows = self._query(
+            """
+            SELECT id, url, link_domains FROM sources
+             WHERE link_domains <> '' AND id <> ?
+            """,
+            (exclude_id,),
+        )
+        result: list[tuple[int, str, set[str]]] = []
+        for row in rows:
+            domains = {item for item in row["link_domains"].split(",") if item}
+            if domains:
+                result.append((int(row["id"]), row["url"], domains))
+        return result
+
+    def auto_disable_failing_sources(self, max_failures: int) -> list[str]:
+        """연속 실패가 한도를 넘은 홍보사이트를 자동으로 내립니다."""
+        if max_failures <= 0:
+            return []
+        rows = self._query(
+            """
+            SELECT url FROM sources
+             WHERE state = ? AND consecutive_failures >= ?
+            """,
+            (CRAWLABLE_STATE, max_failures),
+        )
+        if not rows:
+            return []
+        self._execute(
+            """
+            UPDATE sources
+               SET state = 'auto_disabled', enabled = 0
+             WHERE state = ? AND consecutive_failures >= ?
+            """,
+            (CRAWLABLE_STATE, max_failures),
+        )
+        return [row["url"] for row in rows]
+
+    def discovery_stats_by_depth(self) -> list[sqlite3.Row]:
+        """깊이별 성과 — max_depth 를 조정할 때 근거가 됩니다."""
+        return self._query(
+            """
+            SELECT depth,
+                   COUNT(*)                     AS sources,
+                   COALESCE(SUM(found_total), 0) AS found_total,
+                   COALESCE(AVG(found_total), 0) AS found_avg
+              FROM sources
+             WHERE state = ?
+             GROUP BY depth
+             ORDER BY depth
+            """,
+            (CRAWLABLE_STATE,),
+        )
 
     def set_source_enabled(self, url: str, enabled: bool) -> bool:
         cursor = self._execute(
@@ -474,6 +869,25 @@ class Storage:
             (limit,),
         )
 
+    def reclassify_site_as_promo(self, domain: str) -> int:
+        """홍보사이트로 확정된 도메인이 불법사이트 목록에도 들어가 있으면 제외 처리.
+
+        홍보사이트는 링크 텍스트에 도박 키워드가 잔뜩 있어서 불법사이트로도
+        잡히기 쉽습니다. 2단계 평가에서 홍보사이트로 확정되면 여기서 정리합니다.
+        """
+        if not domain:
+            return 0
+        cursor = self._execute(
+            """
+            UPDATE sites
+               SET status = 'ignored',
+                   memo = CASE WHEN memo = '' THEN ? ELSE memo END
+             WHERE domain = ? AND status <> 'ignored'
+            """,
+            ("홍보사이트로 재분류됨 (수집원 목록으로 이동)", domain),
+        )
+        return max(0, cursor.rowcount)
+
     def set_site_status(self, url: str, status: str, memo: str | None = None) -> bool:
         if status not in SITE_STATUSES:
             raise ValueError(f"status 는 {SITE_STATUSES} 중 하나여야 합니다.")
@@ -489,8 +903,16 @@ class Storage:
 
     # -- 조회 (엑셀/대시보드용) --------------------------------------------
     def sites_for_export(
-        self, min_score: int, categories_excluded: Iterable[str] = ()
+        self,
+        min_score: int,
+        categories_excluded: Iterable[str] = (),
+        include_ignored: bool = True,
     ) -> list[sqlite3.Row]:
+        """엑셀에 실을 사이트 목록.
+
+        ``include_ignored=False`` 면 제외 처리된 것(오탐으로 판정했거나
+        홍보사이트로 재분류된 것)은 빼고 돌려줍니다.
+        """
         excluded = tuple(categories_excluded)
         sql = "SELECT * FROM sites WHERE score >= ?"
         params: list[Any] = [min_score]
@@ -498,6 +920,8 @@ class Storage:
             placeholders = ", ".join("?" for _ in excluded)
             sql += f" AND category NOT IN ({placeholders})"
             params.extend(excluded)
+        if not include_ignored:
+            sql += " AND status <> 'ignored'"
         sql += " ORDER BY score DESC, last_seen_at DESC"
         return self._query(sql, params)
 
@@ -507,15 +931,17 @@ class Storage:
             (category,),
         )
 
-    def sites_first_seen_since(self, iso_timestamp: str, min_score: int = 0) -> list[sqlite3.Row]:
-        return self._query(
-            """
+    def sites_first_seen_since(
+        self, iso_timestamp: str, min_score: int = 0, include_ignored: bool = True
+    ) -> list[sqlite3.Row]:
+        sql = """
             SELECT * FROM sites
              WHERE first_seen_at >= ? AND score >= ?
-             ORDER BY first_seen_at DESC
-            """,
-            (iso_timestamp, min_score),
-        )
+        """
+        if not include_ignored:
+            sql += " AND status <> 'ignored'"
+        sql += " ORDER BY first_seen_at DESC"
+        return self._query(sql, (iso_timestamp, min_score))
 
     def observations_for_site(self, site_id: int, limit: int = 20) -> list[sqlite3.Row]:
         return self._query(
@@ -568,7 +994,8 @@ class Storage:
                 COALESCE(SUM(alive = 1), 0)                        AS alive,
                 COALESCE(SUM(alive = 0), 0)                        AS dead,
                 COALESCE(SUM(alive IS NULL), 0)                    AS unchecked,
-                COALESCE(SUM(status = 'reported'), 0)              AS reported
+                COALESCE(SUM(status = 'reported'), 0)              AS reported,
+                COALESCE(SUM(status = 'ignored'), 0)               AS ignored
               FROM sites
             """,
             (min_score,),
@@ -595,6 +1022,14 @@ class Storage:
                 "new_7d": int(week[0]["n"]) if week else 0,
                 "sources_total": self.count_sources(),
                 "sources_enabled": self.count_sources(enabled_only=True),
+                "candidates_pending": self.count_sources(state="pending"),
+                "candidates_discovered": self.count_sources(state="discovered"),
+                "sources_auto": int(
+                    self._query(
+                        "SELECT COUNT(*) AS n FROM sources WHERE origin = 'auto' AND state = ?",
+                        (CRAWLABLE_STATE,),
+                    )[0]["n"]
+                ),
                 "by_category": [dict(row) for row in by_category],
             }
         )
@@ -611,7 +1046,7 @@ class Storage:
             UPDATE runs
                SET finished_at = ?, sources_total = ?, sources_ok = ?, sources_failed = ?,
                    pages_fetched = ?, candidates_found = ?, new_sites = ?, updated_sites = ?,
-                   duration_ms = ?, note = ?
+                   duration_ms = ?, note = ?, candidates_added = ?, sources_approved = ?
              WHERE id = ?
             """,
             (
@@ -625,6 +1060,8 @@ class Storage:
                 stats.updated_sites,
                 duration_ms,
                 stats.note[:500],
+                stats.candidates_added,
+                stats.sources_approved,
                 run_id,
             ),
         )

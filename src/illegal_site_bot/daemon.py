@@ -24,6 +24,7 @@ from typing import Any
 from .classifier import Classifier, load_rules
 from .config import Config
 from .control import Control
+from .discovery import Discovery
 from .exporter import Exporter
 from .fetcher import Fetcher
 from .pipeline import Pipeline
@@ -53,6 +54,8 @@ class LastCycle:
     candidates_found: int = 0
     new_sites: int = 0
     updated_sites: int = 0
+    candidates_added: int = 0
+    sources_approved: int = 0
     export_path: str = ""
     error: str = ""
     note: str = ""
@@ -87,6 +90,12 @@ class BotDaemon:
         self.renderer = Renderer(config.renderer, config.crawl.user_agent)
 
         targets = load_targets(config.root / "config" / "targets.yaml")
+        self.discovery = Discovery(
+            config=config,
+            storage=self.storage,
+            classifier=self.classifier,
+            fetcher=self.fetcher,
+        )
         self.pipeline = Pipeline(
             config=config,
             storage=self.storage,
@@ -94,6 +103,7 @@ class BotDaemon:
             fetcher=self.fetcher,
             renderer=self.renderer,
             pagination_patterns=targets.pagination_patterns,
+            discovery=self.discovery,
         )
         self.exporter = Exporter(config, self.storage, self.classifier)
 
@@ -218,6 +228,26 @@ class BotDaemon:
             summary.error = f"{type(exc).__name__}: {exc}"
             stats.note = summary.error
 
+        # 홍보사이트 자동 발견 - 이번 사이클에 모인 후보를 예산 안에서 평가합니다.
+        # 수집 도중이 아니라 여기서 일괄 처리해야 사이클 소요 시간이 예측 가능합니다.
+        if self.config.discovery.enabled and not self._should_stop():
+            try:
+                self._update_status(phase="홍보사이트 후보 평가 중")
+                found = self.discovery.evaluate_pending(self._should_stop)
+                stats.sources_approved = found.approved
+                if found.evaluated or found.approved or found.queued:
+                    log.info(
+                        "후보 평가: %d건 확인 → 자동승인 %d / 대기 %d / 기각 %d / 미러 %d",
+                        found.evaluated,
+                        found.approved,
+                        found.queued,
+                        found.rejected,
+                        found.mirrors,
+                    )
+                self.discovery.cleanup_dead_sources()
+            except Exception:
+                log.exception("홍보사이트 후보 평가 중 예외")
+
         duration_ms = int((time.monotonic() - started) * 1000)
         self.storage.finish_run(run_id, stats, duration_ms)
 
@@ -231,6 +261,8 @@ class BotDaemon:
         summary.candidates_found = stats.candidates_found
         summary.new_sites = stats.new_sites
         summary.updated_sites = stats.updated_sites
+        summary.candidates_added = stats.candidates_added
+        summary.sources_approved = stats.sources_approved
         summary.note = stats.note
 
         # 생존 확인 (설정한 주기마다)

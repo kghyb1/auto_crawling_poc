@@ -292,7 +292,11 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
                  f"{summary.get('alive', 0)} / {summary.get('dead', 0)} / {summary.get('unchecked', 0)}"),
                 ("신고완료 처리", summary.get("reported", 0)),
                 ("홍보사이트 사용/등록",
-                 f"{summary.get('sources_enabled', 0)} / {summary.get('sources_total', 0)}"),
+                 f"{summary.get('sources_enabled', 0)} / {summary.get('sources_total', 0)}"
+                 f" (자동 발견 {summary.get('sources_auto', 0)})"),
+                ("검토 대기 후보",
+                 f"{summary.get('candidates_pending', 0)}건"
+                 f" (평가 대기 {summary.get('candidates_discovered', 0)}건)"),
             ]
         )
 
@@ -407,20 +411,28 @@ def cmd_add_source(args: argparse.Namespace, config: Config) -> int:
 def cmd_list_sources(args: argparse.Namespace, config: Config) -> int:
     storage = Storage(config.database_path)
     try:
-        rows = storage.source_rows()
+        rows = [row for row in storage.source_rows() if row["state"] == "approved"]
         if not rows:
             print("등록된 홍보사이트가 없습니다. `python bot.py add-source URL` 로 추가하세요.")
             return EXIT_OK
-        print(f"{'사용':<5}{'연속실패':<9}{'누적':<7}{'마지막 수집':<21}URL")
+        print(f"{'사용':<5}{'출처':<7}{'깊이':<5}{'연속실패':<9}{'누적':<7}{'마지막 수집':<21}URL")
         for row in rows:
             print(
                 f"{'ON' if row['enabled'] else 'OFF':<5}"
+                f"{'자동' if row['origin'] == 'auto' else '수동':<7}"
+                f"{row['depth']:<5}"
                 f"{row['consecutive_failures']:<9}"
                 f"{row['found_total']:<7}"
                 f"{local_str(row['last_crawled_at'], '-'):<21}"
                 f"{row['url']}"
                 + (f"  ({row['name']})" if row["name"] else "")
             )
+
+        waiting = storage.count_sources(state="pending") + storage.count_sources(
+            state="discovered"
+        )
+        if waiting:
+            print(f"\n검토 대기 중인 후보 {waiting}건이 있습니다: python bot.py candidates")
         return EXIT_OK
     finally:
         storage.close()
@@ -476,6 +488,123 @@ def cmd_import_targets(args: argparse.Namespace, config: Config) -> int:
             )
         enabled = sum(1 for spec in targets.sources if spec.enabled)
         print(f"{len(targets.sources)}곳을 반영했습니다 (사용 {enabled}곳).")
+        return EXIT_OK
+    finally:
+        storage.close()
+
+
+def cmd_candidates(args: argparse.Namespace, config: Config) -> int:
+    """봇이 찾아낸 홍보사이트 후보 목록."""
+    storage = Storage(config.database_path)
+    try:
+        states = (args.state,) if args.state else ("pending", "discovered")
+        rows = storage.sources_by_state(*states)
+        if not rows:
+            print("대기 중인 후보가 없습니다.")
+            print("봇이 수집을 돌면서 다른 홍보사이트를 발견하면 여기에 쌓입니다.")
+            return EXIT_OK
+
+        print(f"{'점수':<6}{'상태':<12}{'깊이':<6}URL")
+        print("-" * 78)
+        for row in rows:
+            state_label = {
+                "discovered": "평가 대기",
+                "pending": "승인 대기",
+                "rejected": "기각",
+                "auto_disabled": "자동 중지",
+                "approved": "승인됨",
+            }.get(row["state"], row["state"])
+            print(f"{row['promo_score']:<8}{state_label:<12}{row['depth']:<6}{row['url']}")
+            if row["name"]:
+                print(f"{'':<26}{row['name']}")
+            if row["promo_reasons"]:
+                print(f"{'':<26}└ {row['promo_reasons']}")
+            if row["discovered_from_id"]:
+                origin_row = storage.source_by_id(int(row["discovered_from_id"]))
+                if origin_row is not None:
+                    print(f"{'':<26}← 발견 경로: {origin_row['url']}")
+        print("-" * 78)
+        print(f"총 {len(rows)}건")
+        print("승인: python bot.py approve <URL>   /   기각: python bot.py reject <URL>")
+        return EXIT_OK
+    finally:
+        storage.close()
+
+
+def cmd_review(args: argparse.Namespace, config: Config) -> int:
+    """후보를 승인하거나 기각합니다."""
+    from .normalizer import registrable_domain
+
+    storage = Storage(config.database_path)
+    try:
+        url = _require_url(args.url)
+        approving = args.command == "approve"
+        state = "approved" if approving else "rejected"
+        if not storage.review_source(url, state, by="cli", note=args.note or ""):
+            print(f"후보 목록에 없는 주소입니다: {url}")
+            print("`python bot.py candidates` 로 목록을 확인하세요.")
+            return EXIT_ERROR
+
+        if approving:
+            moved = storage.reclassify_site_as_promo(registrable_domain(url))
+            print(f"승인했습니다. 다음 사이클부터 수집합니다: {url}")
+            if moved:
+                print(f"  불법사이트 목록에 있던 {moved}건을 홍보사이트로 재분류했습니다.")
+        else:
+            print(f"기각했습니다: {url}")
+            days = config.discovery.reevaluate_after_days
+            if days > 0:
+                print(f"  {days}일 뒤 다시 평가 대상이 됩니다.")
+        return EXIT_OK
+    finally:
+        storage.close()
+
+
+def cmd_evaluate(args: argparse.Namespace, config: Config) -> int:
+    """저장하지 않고 홍보사이트 판별 점수만 계산합니다 (2단계 평가 미리보기)."""
+    from .discovery import Discovery
+    from .fetcher import Fetcher
+
+    url = _require_url(args.url)
+    storage = Storage(config.database_path)
+    try:
+        classifier = Classifier(load_rules(config.root / "config" / "rules.yaml"))
+        with Fetcher(config.crawl) as fetcher:
+            discovery = Discovery(config, storage, classifier, fetcher)
+            print(f"평가 중: {url}")
+            evaluation = discovery.evaluate_url(url)
+
+        if not evaluation.ok:
+            print(f"가져오지 못했습니다: {evaluation.error}")
+            return EXIT_ERROR
+
+        settings = config.discovery
+        if evaluation.score >= settings.auto_approve_score:
+            verdict = f"자동 승인 기준({settings.auto_approve_score}점) 이상"
+        elif evaluation.score >= settings.queue_score:
+            verdict = f"승인 대기 기준({settings.queue_score}점) 이상"
+        else:
+            verdict = f"기준 미달 ({settings.queue_score}점 미만) - 홍보사이트가 아닌 것으로 판단"
+
+        print()
+        _print_kv(
+            [
+                ("제목", evaluation.title or "-"),
+                ("홍보사이트 점수", f"{evaluation.score} / 100  → {verdict}"),
+                ("이미 아는 불법 도메인", f"{evaluation.known_illegal}곳"),
+                ("외부 도메인", f"{evaluation.outbound_domains}개"),
+                ("배너 링크 비율", f"{evaluation.banner_ratio:.0%}"),
+                ("로그인 랜딩 페이지", "예 (감점)" if evaluation.landing_page else "아니오"),
+            ]
+        )
+        print("\n[ 판별 근거 ]")
+        for reason in evaluation.reasons or ["(없음)"]:
+            print(f"  - {reason}")
+
+        if args.add and evaluation.score >= settings.queue_score:
+            storage.add_candidate(url, discovered_from_id=None, depth=0, note="수동 평가로 추가")
+            storage.review_source(url, "pending", by="cli")
+            print(f"\n후보 목록에 추가했습니다. 승인하려면: python bot.py approve {url}")
         return EXIT_OK
     finally:
         storage.close()
@@ -633,6 +762,34 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "import-targets", help="config/targets.yaml 을 DB 에 반영합니다"
     ).set_defaults(func=cmd_import_targets)
+
+    candidates = subparsers.add_parser(
+        "candidates", help="봇이 찾아낸 홍보사이트 후보를 봅니다"
+    )
+    candidates.add_argument(
+        "--state",
+        choices=("discovered", "pending", "rejected", "approved", "auto_disabled"),
+        help="특정 상태만 보기 (기본: 평가 대기 + 승인 대기)",
+    )
+    candidates.set_defaults(func=cmd_candidates)
+
+    for name, help_text in (
+        ("approve", "홍보사이트 후보를 승인합니다 (다음 사이클부터 수집)"),
+        ("reject", "홍보사이트 후보를 기각합니다"),
+    ):
+        sub = subparsers.add_parser(name, help=help_text)
+        sub.add_argument("url", metavar="URL")
+        sub.add_argument("--note", help="비고")
+        sub.set_defaults(func=cmd_review)
+
+    evaluate = subparsers.add_parser(
+        "evaluate", help="어떤 주소가 홍보사이트인지 점수만 계산합니다 (저장 안 함)"
+    )
+    evaluate.add_argument("url", metavar="URL")
+    evaluate.add_argument(
+        "--add", action="store_true", help="기준을 넘으면 후보 목록에도 추가"
+    )
+    evaluate.set_defaults(func=cmd_evaluate)
 
     mark = subparsers.add_parser("mark", help="사이트의 처리 상태/메모를 기록합니다")
     mark.add_argument("url", metavar="URL")

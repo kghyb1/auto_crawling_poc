@@ -48,6 +48,50 @@ class Verdict:
 
 
 @dataclass
+class PromotionRules:
+    """'이 링크가 또 다른 홍보사이트인가'를 판별하는 규칙 (자동 발견용)."""
+
+    link_vocabulary: tuple[str, ...] = ()
+    title_vocabulary: tuple[str, ...] = ()
+    login_markers: tuple[str, ...] = ()
+    known_illegal_scores: dict[int, int] = field(default_factory=dict)
+    outbound_domain_scores: dict[int, int] = field(default_factory=dict)
+    keyword_density_max: int = 15
+    title_vocabulary_each: int = 8
+    title_vocabulary_max: int = 20
+    banner_ratio_max: int = 10
+    landing_page_penalty: int = 30
+    landing_page_max_outbound: int = 3
+
+    @staticmethod
+    def _tiered(table: dict[int, int], value: int) -> int:
+        """'N개 이상이면 M점' 표에서 해당하는 점수를 찾습니다."""
+        best = 0
+        for threshold, score in sorted(table.items()):
+            if value >= threshold:
+                best = score
+        return best
+
+    def known_illegal_score(self, count: int) -> int:
+        return self._tiered(self.known_illegal_scores, count)
+
+    def outbound_domain_score(self, count: int) -> int:
+        return self._tiered(self.outbound_domain_scores, count)
+
+    def matched_link_vocabulary(self, text: str) -> list[str]:
+        lowered = (text or "").lower()
+        return [word for word in self.link_vocabulary if word.lower() in lowered]
+
+    def matched_title_vocabulary(self, text: str) -> list[str]:
+        lowered = (text or "").lower()
+        return [word for word in self.title_vocabulary if word.lower() in lowered]
+
+    def has_login_marker(self, text: str) -> bool:
+        lowered = (text or "").lower()
+        return any(marker.lower() in lowered for marker in self.login_markers)
+
+
+@dataclass
 class Rules:
     base_score: int = 15
     anchor_weight: float = 1.0
@@ -64,6 +108,7 @@ class Rules:
     exclude_domains: set[str] = field(default_factory=set)
     exclude_domain_suffixes: tuple[str, ...] = ()
     exclude_url_patterns: list[re.Pattern[str]] = field(default_factory=list)
+    promotion: PromotionRules = field(default_factory=PromotionRules)
 
     def category_label(self, category: str) -> str:
         if category == CONTACT_CATEGORY:
@@ -142,6 +187,43 @@ def load_rules(path: str | Path) -> Rules:
         except re.error as exc:
             raise RulesError(f"exclude.url_patterns 정규식 오류 ({pattern}): {exc}") from exc
 
+    promotion_raw = raw.get("promotion") or {}
+    if not isinstance(promotion_raw, dict):
+        raise RulesError("promotion 섹션은 매핑이어야 합니다.")
+    promotion_scoring = promotion_raw.get("scoring") or {}
+
+    def _word_list(key: str) -> tuple[str, ...]:
+        return tuple(
+            str(word).strip()
+            for word in (promotion_raw.get(key) or [])
+            if str(word).strip()
+        )
+
+    def _tier_table(key: str) -> dict[int, int]:
+        table: dict[int, int] = {}
+        for threshold, score in (promotion_scoring.get(key) or {}).items():
+            try:
+                table[int(threshold)] = _as_int(score, 0)
+            except (TypeError, ValueError):
+                raise RulesError(f"promotion.scoring.{key} 의 키는 정수여야 합니다.") from None
+        return table
+
+    promotion = PromotionRules(
+        link_vocabulary=_word_list("link_vocabulary"),
+        title_vocabulary=_word_list("title_vocabulary"),
+        login_markers=_word_list("login_markers"),
+        known_illegal_scores=_tier_table("known_illegal_scores"),
+        outbound_domain_scores=_tier_table("outbound_domain_scores"),
+        keyword_density_max=_as_int(promotion_scoring.get("keyword_density_max"), 15),
+        title_vocabulary_each=_as_int(promotion_scoring.get("title_vocabulary_each"), 8),
+        title_vocabulary_max=_as_int(promotion_scoring.get("title_vocabulary_max"), 20),
+        banner_ratio_max=_as_int(promotion_scoring.get("banner_ratio_max"), 10),
+        landing_page_penalty=_as_int(promotion_scoring.get("landing_page_penalty"), 30),
+        landing_page_max_outbound=_as_int(
+            promotion_scoring.get("landing_page_max_outbound"), 3
+        ),
+    )
+
     return Rules(
         base_score=_as_int(scoring.get("base_score"), 15),
         anchor_weight=_as_float(scoring.get("anchor_weight"), 1.0),
@@ -169,6 +251,7 @@ def load_rules(path: str | Path) -> Rules:
             str(suffix).strip().lower() for suffix in exclude.get("domain_suffixes") or []
         ),
         exclude_url_patterns=exclude_url_patterns,
+        promotion=promotion,
     )
 
 

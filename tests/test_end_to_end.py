@@ -162,6 +162,7 @@ class TestExcelExport:
             "신규_최근24시간",
             "연락채널",
             "홍보사이트_수집원",
+            "홍보사이트_후보",
             "실행이력",
         ]
 
@@ -197,7 +198,8 @@ class TestExcelExport:
         sheet = load_workbook(exported.path)["홍보사이트_수집원"]
         rows = [row for row in sheet.iter_rows(min_row=2, values_only=True)]
         assert any(row[1] == promo_server for row in rows)
-        assert any(row[3] == "ON" for row in rows)
+        assert any(row[3] == "수동" for row in rows)   # 출처
+        assert any(row[5] == "ON" for row in rows)     # 사용
 
     def test_new_sheet_contains_todays_finds(self, exported):
         sheet = load_workbook(exported.path)["신규_최근24시간"]
@@ -234,3 +236,129 @@ class TestRobots:
         stats = bot["pipeline"].run_cycle()
         assert stats.sources_failed == 1
         assert stats.new_sites == 0
+
+
+class TestDiscoveryLoop:
+    """자가 확장 전체 흐름: 시드 수집 → 다른 홍보사이트 발견 → 승인 → 그곳까지 수집."""
+
+    @pytest.fixture
+    def loop(self, config, promo_server, partner_server):
+        from illegal_site_bot.discovery import Discovery
+
+        storage = Storage(config.database_path)
+        classifier = Classifier(load_rules(config.root / "config" / "rules.yaml"))
+        fetcher = Fetcher(config.crawl)
+        discovery = Discovery(config, storage, classifier, fetcher)
+        pipeline = Pipeline(
+            config=config,
+            storage=storage,
+            classifier=classifier,
+            fetcher=fetcher,
+            renderer=None,
+            pagination_patterns=("page=", "board"),
+            discovery=discovery,
+        )
+        storage.upsert_source(promo_server, name="시드 홍보사이트")
+        try:
+            yield {
+                "storage": storage,
+                "pipeline": pipeline,
+                "discovery": discovery,
+                "seed": promo_server,
+                "partner": partner_server,
+                "config": config,
+                "classifier": classifier,
+            }
+        finally:
+            fetcher.close()
+            storage.close()
+
+    def test_cycle_discovers_the_linked_promo_site(self, loop):
+        stats = loop["pipeline"].run_cycle()
+        assert stats.candidates_added == 1
+
+        rows = loop["storage"].sources_by_state("discovered")
+        assert [row["url"] for row in rows] == [loop["partner"]]
+        assert rows[0]["depth"] == 1
+        assert rows[0]["origin"] == "auto"
+
+    def test_discovered_site_is_not_crawled_before_approval(self, loop):
+        loop["pipeline"].run_cycle()
+        loop["discovery"].evaluate_pending()
+
+        crawled = [source.url for source in loop["storage"].list_sources(enabled_only=True)]
+        assert crawled == [loop["seed"]]
+
+    def test_evaluation_queues_it_with_a_high_score(self, loop):
+        loop["pipeline"].run_cycle()          # 시드에서 불법사이트들을 먼저 수집
+        loop["discovery"].evaluate_pending()  # 그 결과가 A 신호로 쓰입니다
+
+        row = loop["storage"].source_by_url(loop["partner"])
+        assert row["state"] == "pending"
+        assert row["promo_score"] >= loop["config"].discovery.auto_approve_score
+        assert "이미 수집된 불법사이트" in row["promo_reasons"]
+
+    def test_approved_site_is_crawled_and_yields_new_urls(self, loop):
+        loop["pipeline"].run_cycle()
+        loop["discovery"].evaluate_pending()
+        assert loop["discovery"].approve(loop["partner"], by="테스트") is True
+
+        # 승인 뒤 사이클에서는 그 사이트까지 돌면서 거기서만 보이는 URL 을 찾습니다.
+        before = _collected_urls(loop["storage"])
+        assert "https://newly-found-casino-42.top/" not in before
+
+        stats = loop["pipeline"].run_cycle()
+        assert stats.sources_total == 2
+        after = _collected_urls(loop["storage"])
+        assert "https://newly-found-casino-42.top/" in after
+
+    def test_rejected_site_is_never_crawled(self, loop):
+        loop["pipeline"].run_cycle()
+        loop["discovery"].evaluate_pending()
+        assert loop["discovery"].reject(loop["partner"], by="테스트") is True
+
+        stats = loop["pipeline"].run_cycle()
+        assert stats.sources_total == 1
+        assert "https://newly-found-casino-42.top/" not in _collected_urls(loop["storage"])
+
+    def test_discovery_can_be_turned_off(self, config, promo_server, partner_server):
+        import dataclasses
+
+        from illegal_site_bot.discovery import Discovery
+
+        off = dataclasses.replace(
+            config, discovery=dataclasses.replace(config.discovery, enabled=False)
+        )
+        storage = Storage(off.database_path)
+        classifier = Classifier(load_rules(off.root / "config" / "rules.yaml"))
+        fetcher = Fetcher(off.crawl)
+        try:
+            pipeline = Pipeline(
+                config=off,
+                storage=storage,
+                classifier=classifier,
+                fetcher=fetcher,
+                pagination_patterns=("page=", "board"),
+                discovery=Discovery(off, storage, classifier, fetcher),
+            )
+            storage.upsert_source(promo_server, name="시드")
+            stats = pipeline.run_cycle()
+            assert stats.candidates_added == 0
+            assert storage.sources_by_state("discovered") == []
+        finally:
+            fetcher.close()
+            storage.close()
+
+    def test_candidate_sheet_shows_up_in_excel(self, loop):
+        loop["pipeline"].run_cycle()
+        loop["discovery"].evaluate_pending()
+        result = Exporter(loop["config"], loop["storage"], loop["classifier"]).export()
+
+        sheet = load_workbook(result.path)["홍보사이트_후보"]
+        rows = [row for row in sheet.iter_rows(min_row=2, values_only=True)]
+        candidate = next(row for row in rows if row[1] == loop["partner"])
+        assert candidate[3] == "승인 대기"
+        assert candidate[4] > 0                       # 점수
+        assert candidate[5] == 1                      # 깊이
+        assert "이미 수집된 불법사이트" in candidate[6]  # 판별 근거
+        assert candidate[7] == loop["seed"]           # 발견 경로
