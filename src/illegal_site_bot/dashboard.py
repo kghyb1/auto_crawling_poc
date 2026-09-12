@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 from .classifier import CONTACT_CATEGORY, Classifier
 from .config import Config
 from .control import Control
-from .normalizer import normalize_url, registrable_domain
+from .normalizer import normalize_url
 from .storage import Storage
 from .timeutil import days_ago, humanize_duration, local_str, now_utc, parse_iso
 
@@ -258,7 +258,8 @@ def _status_payload(state: DashboardState) -> dict[str, Any]:
             remaining = (parsed - now_utc()).total_seconds()
             next_run_text = f"{local_str(next_run_at)} ({humanize_duration(max(0, remaining))} 후)"
 
-    recent_rows = storage.sites_first_seen_since(days_ago(30), config.export.min_score)[:20]
+    # 연락채널을 걸러낸 *뒤에* 20건을 자릅니다. 순서를 바꾸면 최근 발견이
+    # 전부 텔레그램 링크일 때 화면이 비어 보입니다.
     recent = [
         {
             "url": row["url"],
@@ -267,9 +268,11 @@ def _status_payload(state: DashboardState) -> dict[str, Any]:
             "score": int(row["score"]),
             "first_seen": local_str(row["first_seen_at"]),
         }
-        for row in recent_rows
+        for row in storage.sites_first_seen_since(
+            days_ago(30), config.export.min_score, include_ignored=False
+        )
         if row["category"] != CONTACT_CATEGORY
-    ]
+    ][:20]
 
     candidates = [
         {
@@ -341,6 +344,24 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:  # 접근 로그는 DEBUG 로만
         log.debug("dashboard %s - %s", self.address_string(), fmt % args)
 
+    def _same_origin(self) -> bool:
+        """다른 사이트가 브라우저를 통해 보낸 요청인지 확인합니다.
+
+        토큰 없이 127.0.0.1 로 열어두면, 운영자가 아무 웹페이지만 방문해도
+        그 페이지가 몰래 POST 를 보내 수집을 꺼버릴 수 있습니다(CSRF).
+        단순 form POST 는 preflight 가 없어 브라우저가 막아주지 않습니다.
+        """
+        origin = self.headers.get("Origin")
+        if origin is None:
+            # 브라우저가 아닌 curl/스크립트 요청. Sec-Fetch-Site 가 있으면 확인.
+            fetch_site = self.headers.get("Sec-Fetch-Site")
+            return fetch_site in (None, "same-origin", "same-site", "none")
+        allowed = {
+            f"http://{self.headers.get('Host', '')}",
+            f"https://{self.headers.get('Host', '')}",
+        }
+        return origin in allowed
+
     def _authorized(self, query: dict[str, list[str]]) -> bool:
         token = self.state.config.dashboard.token
         if not token:
@@ -399,21 +420,23 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_text("url 파라미터가 필요합니다.", HTTPStatus.BAD_REQUEST)
             return
 
+        from .discovery import review_candidate
+
         approving = path == "/api/approve"
-        state = "approved" if approving else "rejected"
         try:
-            updated = self.state.storage.review_source(target, state, by="대시보드")
+            handled, _moved = review_candidate(
+                self.state.storage, target, approving, by="대시보드"
+            )
         except Exception as exc:
             log.exception("후보 검토 처리 실패 %s", target)
             self._send_text(f"처리 실패: {exc}", HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
-        if not updated:
+        if not handled:
             self._send_text("후보 목록에 없는 주소입니다.", HTTPStatus.NOT_FOUND)
             return
 
         if approving:
-            self.state.storage.reclassify_site_as_promo(registrable_domain(target))
             message = f"승인했습니다. 다음 사이클부터 수집합니다: {target}"
         else:
             message = f"기각했습니다: {target}"
@@ -423,6 +446,14 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parts = urlsplit(self.path)
         query = parse_qs(parts.query)
+        if not self._same_origin():
+            log.warning(
+                "다른 출처(%s)에서 온 조작 요청을 거부했습니다: %s",
+                self.headers.get("Origin"),
+                parts.path,
+            )
+            self._send_text("다른 사이트에서 보낸 요청은 처리하지 않습니다.", HTTPStatus.FORBIDDEN)
+            return
         if not self._authorized(query):
             self._send_text("토큰이 필요합니다.", HTTPStatus.UNAUTHORIZED)
             return

@@ -107,7 +107,7 @@ def cmd_start(args: argparse.Namespace, config: Config) -> int:
         return EXIT_ERROR
 
     if args.detach:
-        return _start_detached(config)
+        return _start_detached(config, args)
 
     setup_logging(
         config.log_dir,
@@ -128,10 +128,19 @@ def cmd_start(args: argparse.Namespace, config: Config) -> int:
         return EXIT_ERROR
 
 
-def _start_detached(config: Config) -> int:
-    """백그라운드 프로세스로 띄웁니다."""
+def _start_detached(config: Config, args: argparse.Namespace) -> int:
+    """백그라운드 프로세스로 띄웁니다.
+
+    부모가 받은 옵션을 그대로 넘겨야 합니다. 안 그러면 자식이 다른 설정
+    파일(=다른 DB·다른 출력 경로)로 돌면서 성공한 것처럼 보입니다.
+    """
     entry = config.root / "bot.py"
-    command = [sys.executable, str(entry), "start"]
+    command = [sys.executable, str(entry)]
+    if getattr(args, "config", None):
+        command += ["--config", str(Path(args.config).resolve())]
+    command.append("start")
+    if getattr(args, "no_dashboard", False):
+        command.append("--no-dashboard")
     log_path = config.log_dir
     log_path.mkdir(parents=True, exist_ok=True)
     stdout_path = log_path / "start-detached.log"
@@ -537,20 +546,21 @@ def cmd_candidates(args: argparse.Namespace, config: Config) -> int:
 
 def cmd_review(args: argparse.Namespace, config: Config) -> int:
     """후보를 승인하거나 기각합니다."""
-    from .normalizer import registrable_domain
+    from .discovery import review_candidate
 
     storage = Storage(config.database_path)
     try:
         url = _require_url(args.url)
         approving = args.command == "approve"
-        state = "approved" if approving else "rejected"
-        if not storage.review_source(url, state, by="cli", note=args.note or ""):
+        handled, moved = review_candidate(
+            storage, url, approving, by="cli", note=args.note or ""
+        )
+        if not handled:
             print(f"후보 목록에 없는 주소입니다: {url}")
             print("`python bot.py candidates` 로 목록을 확인하세요.")
             return EXIT_ERROR
 
         if approving:
-            moved = storage.reclassify_site_as_promo(registrable_domain(url))
             print(f"승인했습니다. 다음 사이클부터 수집합니다: {url}")
             if moved:
                 print(f"  불법사이트 목록에 있던 {moved}건을 홍보사이트로 재분류했습니다.")

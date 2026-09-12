@@ -84,10 +84,16 @@ _METHOD_RANK = {
 }
 
 
+#: 엑셀(openpyxl)이 거부하는 제어문자. 크롤링한 제목/텍스트에 섞여 들어오면
+#: 엑셀 저장이 통째로 실패하므로 들어오는 길목에서 제거합니다.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
 def _clean(text: object) -> str:
     if not isinstance(text, str) or not text:
         return ""
-    return re.sub(r"\s+", " ", text).strip()[:MAX_TEXT_LEN]
+    stripped = _CONTROL_CHARS_RE.sub("", text)
+    return re.sub(r"\s+", " ", stripped).strip()[:MAX_TEXT_LEN]
 
 
 def _anchor_text(tag: Tag) -> tuple[str, bool]:
@@ -219,34 +225,45 @@ def extract(
 
     # 1) <a> 와 링크성 커스텀 속성
     for tag in soup.find_all(["a", "area", "div", "li", "span", "button", "img"]):
-        anchor, banner = _anchor_text(tag) if tag.name in {"a", "area"} else ("", False)
-        context = ""
+        is_anchor = tag.name in {"a", "area"}
+        # 앵커 텍스트와 문맥은 태그당 한 번만 계산합니다. 속성마다 다시 구하면
+        # 배너가 수백 개인 페이지에서 조상 트리를 수천 번 훑게 됩니다.
+        # 문맥은 ''(문맥 없음)도 정상 결과라 계산 여부를 따로 들고 있어야 합니다.
+        text_cache: tuple[str, bool] | None = _anchor_text(tag) if is_anchor else None
+        context_cache: str | None = None
+
+        def anchor_info() -> tuple[str, bool]:
+            nonlocal text_cache
+            if text_cache is None:
+                text_cache = _anchor_text(tag)
+            return text_cache
+
+        def context_of() -> str:
+            nonlocal context_cache
+            if context_cache is None:
+                context_cache = _context_text(tag)
+            return context_cache
+
         for attr in LINK_ATTRIBUTES:
             value = tag.get(attr)
             if not isinstance(value, str) or not value.strip():
                 continue
-            if attr == "href" and tag.name not in {"a", "area"}:
+            if attr == "href" and not is_anchor:
                 continue
             if attr == "data-src" and tag.name == "img":
                 continue  # 이미지 지연 로딩 경로일 뿐
-            if not context:
-                context = _context_text(tag)
-            if tag.name not in {"a", "area"}:
-                anchor, banner = _anchor_text(tag)
+            anchor, banner = anchor_info()
             method = "a_href" if attr == "href" else "data_attr"
-            consider(value, anchor, context, method, banner)
+            consider(value, anchor, context_of(), method, banner)
 
         # onclick 등 인라인 스크립트
         for attr in ("onclick", "onmousedown", "ontouchstart"):
             script = tag.get(attr)
             if not isinstance(script, str):
                 continue
-            if not context:
-                context = _context_text(tag)
-            if not anchor:
-                anchor, banner = _anchor_text(tag)
+            anchor, banner = anchor_info()
             for match in _JS_URL_RE.finditer(script):
-                consider(match.group(1), anchor, context, "js_onclick", banner)
+                consider(match.group(1), anchor, context_of(), "js_onclick", banner)
 
     # 2) iframe / frame
     for tag in soup.find_all(["iframe", "frame"]):

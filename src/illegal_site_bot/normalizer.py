@@ -96,9 +96,12 @@ _DEOBFUSCATE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\s+(?:dot|점|닷)\s+", re.IGNORECASE), "."),
     (re.compile(r"(?<=[a-z0-9])\s*[·・∙•]\s*(?=[a-z0-9])", re.IGNORECASE), "."),
     (re.compile(r"[\[\(\{<]\s*(?:@|at)\s*[\]\)\}>]", re.IGNORECASE), "@"),
-    # "abc . com" / "abc .com" 처럼 점 주변 공백만 있는 경우
+    # "abc . com" 처럼 점 *앞에* 공백이 있는 경우. 정상 문장은 마침표 앞에
+    # 공백을 두지 않으므로 이 형태는 난독화로 봐도 안전합니다.
     (re.compile(r"(?<=[a-z0-9])\s+\.\s*(?=[a-z0-9])", re.IGNORECASE), "."),
-    (re.compile(r"(?<=[a-z0-9])\.\s+(?=[a-z0-9])", re.IGNORECASE), "."),
+    # 주의: "abc. com"(점 뒤에만 공백)은 일부러 처리하지 않습니다. 평범한 영어
+    # 문장의 마침표와 구분할 방법이 없어서, 처리하면 "Sale ends soon. Shop now"
+    # 가 soon.shop 이라는 없는 도메인으로 둔갑해 수집 결과를 오염시킵니다.
 )
 
 

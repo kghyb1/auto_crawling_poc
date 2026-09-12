@@ -95,6 +95,27 @@ def root_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, "/", "", ""))
 
 
+def review_candidate(
+    storage: Storage, url: str, approved: bool, by: str = "cli", note: str = ""
+) -> tuple[bool, int]:
+    """후보를 승인/기각합니다. ``(처리했는지, 재분류된 불법사이트 수)``.
+
+    CLI·대시보드·자동 평가가 모두 이 함수를 씁니다. 승인의 의미가 바뀔 때
+    한 곳만 고치면 되도록 하기 위함입니다.
+    """
+    state = "approved" if approved else "rejected"
+    if not storage.review_source(url, state, by=by, note=note):
+        return False, 0
+    if not approved:
+        return True, 0
+
+    # 홍보사이트로 확정됐으면 불법사이트 목록에서는 빼줍니다.
+    moved = storage.reclassify_site_as_promo(registrable_domain(url))
+    if moved:
+        log.info("불법사이트 목록에서 %d건을 홍보사이트로 재분류했습니다: %s", moved, url)
+    return True, moved
+
+
 class Discovery:
     def __init__(
         self,
@@ -404,20 +425,19 @@ class Discovery:
         return stats
 
     def _on_approved(self, url: str) -> None:
-        """홍보사이트로 확정되면 불법사이트 목록에서는 빼줍니다."""
+        """자동 승인 직후의 뒷정리 (사람 승인은 review_candidate 가 처리)."""
         moved = self.storage.reclassify_site_as_promo(registrable_domain(url))
         if moved:
             log.info("불법사이트 목록에서 %d건을 홍보사이트로 재분류했습니다: %s", moved, url)
 
     def approve(self, url: str, by: str = "cli", note: str = "") -> bool:
         """사람이 후보를 승인합니다."""
-        if not self.storage.review_source(url, "approved", by=by, note=note):
-            return False
-        self._on_approved(url)
-        return True
+        handled, _moved = review_candidate(self.storage, url, True, by=by, note=note)
+        return handled
 
     def reject(self, url: str, by: str = "cli", note: str = "") -> bool:
-        return self.storage.review_source(url, "rejected", by=by, note=note)
+        handled, _moved = review_candidate(self.storage, url, False, by=by, note=note)
+        return handled
 
     # -- 정리 --------------------------------------------------------------
     def cleanup_dead_sources(self) -> list[str]:

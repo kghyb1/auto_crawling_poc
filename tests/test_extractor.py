@@ -110,3 +110,27 @@ class TestMetaRedirect:
     def test_ignores_same_site_redirect(self):
         html = '<meta http-equiv="refresh" content="0;url=/other">'
         assert extract_meta_redirect(html, "https://gate.test/go") is None
+
+
+class TestControlCharacters:
+    """엑셀은 제어문자가 든 문자열을 거부합니다. 들어오는 길목에서 걸러야 합니다."""
+
+    def test_stripped_from_title(self):
+        from illegal_site_bot.extractor import extract_page_signals
+
+        signals = extract_page_signals("<title>Casino \x07 Best \x01 Site</title>")
+        assert "\x07" not in signals.title and "\x01" not in signals.title
+        assert signals.title == "Casino Best Site"
+
+    def test_stripped_from_anchor_text(self):
+        html = '<a href="https://x.xyz/">카지노\x0b추천\x1f</a>'
+        candidate = _by_url(extract(html, SOURCE))["https://x.xyz/"]
+        assert all(ch not in candidate.anchor_text for ch in "\x0b\x1f")
+
+    def test_result_is_writable_to_excel(self):
+        from openpyxl import Workbook
+
+        from illegal_site_bot.extractor import extract_page_signals
+
+        signals = extract_page_signals("<title>A\x00B\x08C</title>")
+        Workbook().active.cell(row=1, column=1, value=signals.title)  # 예외가 나면 실패

@@ -844,8 +844,17 @@ class Storage:
                     "SELECT id FROM sites WHERE url = ? AND id <> ?", (working_url, site_id)
                 ).fetchone()
                 if exists is None:
+                    # 리다이렉트로 완전히 다른 곳에 도착할 수도 있으므로 도메인/호스트도
+                    # 같이 고쳐야 합니다. 안 그러면 url 과 domain 이 서로 다른 곳을
+                    # 가리켜 CSV·묶기·mark 가 전부 어긋납니다.
                     self._conn.execute(
-                        "UPDATE sites SET url = ? WHERE id = ?", (working_url, site_id)
+                        "UPDATE sites SET url = ?, domain = ?, host = ? WHERE id = ?",
+                        (
+                            working_url,
+                            registrable_domain(working_url),
+                            host_of(working_url),
+                            site_id,
+                        ),
                     )
             self._conn.execute(
                 """

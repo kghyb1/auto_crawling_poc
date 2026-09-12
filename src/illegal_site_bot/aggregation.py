@@ -35,7 +35,9 @@ DEFAULT_GROUP_MODE = "host"
 GROUP_LABELS = {"url": "URL", "host": "호스트", "domain": "도메인"}
 
 #: 처리 상태 우선순위 — 그룹 안에 여러 상태가 섞이면 더 진행된 쪽을 보여줍니다.
-_STATUS_ORDER = {"new": 0, "confirmed": 1, "reported": 2, "ignored": 3}
+#: ignored 는 '진행'이 아니라 '제외' 결정이라 가장 낮게 둡니다. 그래야 한 URL 을
+#: 오탐 처리했다고 해서 이미 신고한 그룹 전체가 제외로 보이지 않습니다.
+_STATUS_ORDER = {"ignored": 0, "new": 1, "confirmed": 2, "reported": 3}
 
 #: 한 셀에 나열할 최대 개수 (엑셀 셀이 지나치게 길어지는 것을 막습니다)
 MAX_LISTED = 30

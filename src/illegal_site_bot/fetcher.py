@@ -139,6 +139,9 @@ class Fetcher:
         )
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
+        # requests 기본값은 30홉입니다. 설정한 상한을 실제로 적용하지 않으면
+        # 경유 링크가 25번 튕겨도 전부 따라가게 됩니다.
+        self.session.max_redirects = max(1, config.max_redirect_hops)
         headers = {
             "User-Agent": config.user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",

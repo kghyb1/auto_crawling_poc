@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -161,6 +162,19 @@ class ExportResult:
     warning: str = ""
 
 
+#: 엑셀이 거부하는 제어문자. 추출 단계에서도 걸러내지만, 이전 버전이 저장해 둔
+#: 값이 DB 에 남아 있을 수 있어 기록 직전에 한 번 더 막습니다. 여기서 새면
+#: 엑셀 저장이 통째로 실패하고 그 뒤로 보고서가 갱신되지 않습니다.
+_ILLEGAL_XLSX_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _safe(value: Any) -> Any:
+    """엑셀 셀에 넣어도 안전한 값으로 만듭니다."""
+    if isinstance(value, str):
+        return _ILLEGAL_XLSX_CHARS.sub("", value)
+    return value
+
+
 def _style_header(sheet: Worksheet, columns: Sequence[tuple[str, int]], row: int = 1) -> None:
     for index, (title, width) in enumerate(columns, start=1):
         cell = sheet.cell(row=row, column=index, value=title)
@@ -196,11 +210,16 @@ class Exporter:
     def group_mode(self) -> str:
         return self.config.export.group_by or DEFAULT_GROUP_MODE
 
-    def _group(self, rows: Sequence[sqlite3.Row], mode: str | None = None) -> list[SiteGroup]:
+    def _group(
+        self,
+        rows: Sequence[sqlite3.Row],
+        source_map: dict[int, list[str]],
+        mode: str | None = None,
+    ) -> list[SiteGroup]:
         rules = self.classifier.rules
         return group_sites(
             rows,
-            self.storage.source_urls_grouped(),
+            source_map,
             mode=mode or self.group_mode,
             bonus_per_source=rules.cross_source_bonus_per_source,
             bonus_max=rules.cross_source_bonus_max,
@@ -219,41 +238,41 @@ class Exporter:
             risk = self.classifier.risk_label(group.score)
 
             sheet.cell(row=excel_row, column=1, value=index).alignment = center
-            sheet.cell(row=excel_row, column=2, value=group.key).font = Font(
+            sheet.cell(row=excel_row, column=2, value=_safe(group.key)).font = Font(
                 name="Consolas", size=10
             )
             _write_url(sheet, excel_row, 3, group.representative_url, clickable)
 
-            count_cell = sheet.cell(row=excel_row, column=4, value=group.url_count)
+            count_cell = sheet.cell(row=excel_row, column=4, value=_safe(group.url_count))
             count_cell.alignment = center
-            sheet.cell(row=excel_row, column=5, value=group.urls_text).alignment = wrap
-            sheet.cell(row=excel_row, column=6, value=group.domain)
-            sheet.cell(row=excel_row, column=7, value=group.category_label)
+            sheet.cell(row=excel_row, column=5, value=_safe(group.urls_text)).alignment = wrap
+            sheet.cell(row=excel_row, column=6, value=_safe(group.domain))
+            sheet.cell(row=excel_row, column=7, value=_safe(group.category_label))
 
             risk_cell = sheet.cell(row=excel_row, column=8, value=risk)
             risk_cell.alignment = center
             if risk in RISK_FILLS:
                 risk_cell.fill = RISK_FILLS[risk]
 
-            sheet.cell(row=excel_row, column=9, value=group.score).alignment = center
-            sheet.cell(row=excel_row, column=10, value=local_str(group.first_seen_at))
-            sheet.cell(row=excel_row, column=11, value=local_str(group.last_seen_at))
-            sheet.cell(row=excel_row, column=12, value=group.seen_count).alignment = center
-            sheet.cell(row=excel_row, column=13, value=group.distinct_sources).alignment = center
-            sheet.cell(row=excel_row, column=14, value=group.sources_text).alignment = wrap
-            sheet.cell(row=excel_row, column=15, value=group.matched_keywords).alignment = wrap
-            sheet.cell(row=excel_row, column=16, value=group.reasons).alignment = wrap
-            sheet.cell(row=excel_row, column=17, value=group.redirect_from)
+            sheet.cell(row=excel_row, column=9, value=_safe(group.score)).alignment = center
+            sheet.cell(row=excel_row, column=10, value=_safe(local_str(group.first_seen_at)))
+            sheet.cell(row=excel_row, column=11, value=_safe(local_str(group.last_seen_at)))
+            sheet.cell(row=excel_row, column=12, value=_safe(group.seen_count)).alignment = center
+            sheet.cell(row=excel_row, column=13, value=_safe(group.distinct_sources)).alignment = center
+            sheet.cell(row=excel_row, column=14, value=_safe(group.sources_text)).alignment = wrap
+            sheet.cell(row=excel_row, column=15, value=_safe(group.matched_keywords)).alignment = wrap
+            sheet.cell(row=excel_row, column=16, value=_safe(group.reasons)).alignment = wrap
+            sheet.cell(row=excel_row, column=17, value=_safe(group.redirect_from))
 
             sheet.cell(
                 row=excel_row, column=18, value=ALIVE_TEXT.get(group.alive, "미확인")
             ).alignment = center
-            sheet.cell(row=excel_row, column=19, value=group.http_status).alignment = center
-            sheet.cell(row=excel_row, column=20, value=local_str(group.last_checked_at))
+            sheet.cell(row=excel_row, column=19, value=_safe(group.http_status)).alignment = center
+            sheet.cell(row=excel_row, column=20, value=_safe(local_str(group.last_checked_at)))
             sheet.cell(
                 row=excel_row, column=21, value=STATUS_TEXT.get(group.status, group.status)
             ).alignment = center
-            sheet.cell(row=excel_row, column=22, value=group.memo).alignment = wrap
+            sheet.cell(row=excel_row, column=22, value=_safe(group.memo)).alignment = wrap
 
         if groups:
             last = len(groups) + 1
@@ -277,7 +296,7 @@ class Exporter:
                 horizontal="center"
             )
             _write_url(sheet, excel_row, 2, row["url"], False)
-            sheet.cell(row=excel_row, column=3, value=row["name"])
+            sheet.cell(row=excel_row, column=3, value=_safe(row["name"]))
             sheet.cell(
                 row=excel_row, column=4, value="자동" if row["origin"] == "auto" else "수동"
             ).alignment = Alignment(horizontal="center")
@@ -290,21 +309,21 @@ class Exporter:
             sheet.cell(
                 row=excel_row, column=7, value="예" if row["render"] else "-"
             ).alignment = Alignment(horizontal="center")
-            sheet.cell(row=excel_row, column=8, value=row["max_pages"]).alignment = Alignment(
+            sheet.cell(row=excel_row, column=8, value=_safe(row["max_pages"])).alignment = Alignment(
                 horizontal="center"
             )
-            sheet.cell(row=excel_row, column=9, value=local_str(row["last_crawled_at"]))
-            sheet.cell(row=excel_row, column=10, value=row["last_status"])
+            sheet.cell(row=excel_row, column=9, value=_safe(local_str(row["last_crawled_at"])))
+            sheet.cell(row=excel_row, column=10, value=_safe(row["last_status"]))
             failures = int(row["consecutive_failures"])
             failure_cell = sheet.cell(row=excel_row, column=11, value=failures)
             failure_cell.alignment = Alignment(horizontal="center")
             if failures >= 3:
                 failure_cell.fill = RISK_FILLS["높음"]
             sheet.cell(row=excel_row, column=12, value=int(row["found_total"]))
-            sheet.cell(row=excel_row, column=13, value=row["last_error"]).alignment = Alignment(
+            sheet.cell(row=excel_row, column=13, value=_safe(row["last_error"])).alignment = Alignment(
                 wrap_text=True, vertical="top"
             )
-            sheet.cell(row=excel_row, column=14, value=row["note"])
+            sheet.cell(row=excel_row, column=14, value=_safe(row["note"]))
 
     def _write_candidates_sheet(
         self, sheet: Worksheet, rows: Sequence[sqlite3.Row], origin_map: dict[int, str]
@@ -322,7 +341,7 @@ class Exporter:
                 horizontal="center"
             )
             _write_url(sheet, excel_row, 2, row["url"], False)
-            sheet.cell(row=excel_row, column=3, value=row["name"])
+            sheet.cell(row=excel_row, column=3, value=_safe(row["name"]))
 
             state_cell = sheet.cell(
                 row=excel_row, column=4, value=state_text.get(row["state"], row["state"])
@@ -337,21 +356,21 @@ class Exporter:
             sheet.cell(row=excel_row, column=6, value=int(row["depth"] or 0)).alignment = (
                 Alignment(horizontal="center")
             )
-            sheet.cell(row=excel_row, column=7, value=row["promo_reasons"]).alignment = (
+            sheet.cell(row=excel_row, column=7, value=_safe(row["promo_reasons"])).alignment = (
                 Alignment(wrap_text=True, vertical="top")
             )
             origin = origin_map.get(row["discovered_from_id"], "") if row["discovered_from_id"] else ""
-            sheet.cell(row=excel_row, column=8, value=origin)
-            sheet.cell(row=excel_row, column=9, value=local_str(row["discovered_at"]))
-            sheet.cell(row=excel_row, column=10, value=local_str(row["evaluated_at"]))
+            sheet.cell(row=excel_row, column=8, value=_safe(origin))
+            sheet.cell(row=excel_row, column=9, value=_safe(local_str(row["discovered_at"])))
+            sheet.cell(row=excel_row, column=10, value=_safe(local_str(row["evaluated_at"])))
 
     def _write_runs_sheet(self, sheet: Worksheet, rows: Sequence[sqlite3.Row]) -> None:
         _style_header(sheet, RUN_COLUMNS)
         for index, row in enumerate(rows, start=1):
             excel_row = index + 1
             duration = row["duration_ms"]
-            sheet.cell(row=excel_row, column=1, value=local_str(row["started_at"]))
-            sheet.cell(row=excel_row, column=2, value=local_str(row["finished_at"], "진행 중"))
+            sheet.cell(row=excel_row, column=1, value=_safe(local_str(row["started_at"])))
+            sheet.cell(row=excel_row, column=2, value=_safe(local_str(row["finished_at"], "진행 중")))
             sheet.cell(
                 row=excel_row,
                 column=3,
@@ -373,7 +392,7 @@ class Exporter:
             ):
                 cell = sheet.cell(row=excel_row, column=offset, value=int(row[key] or 0))
                 cell.alignment = Alignment(horizontal="center")
-            sheet.cell(row=excel_row, column=13, value=row["note"])
+            sheet.cell(row=excel_row, column=13, value=_safe(row["note"]))
 
     def _write_summary_sheet(
         self,
@@ -542,9 +561,10 @@ class Exporter:
         "status",
     )
 
-    def _csv_rows(self, rows: Sequence[sqlite3.Row]) -> list[dict[str, Any]]:
+    def _csv_rows(
+        self, rows: Sequence[sqlite3.Row], source_map: dict[int, list[str]]
+    ) -> list[dict[str, Any]]:
         """DB 행을 CSV 한 줄씩으로 바꿉니다 (묶지 않고 URL 단위 그대로)."""
-        source_map = self.storage.source_urls_grouped()
         alive_text = {1: "alive", 0: "dead", None: ""}
         output: list[dict[str, Any]] = []
         for row in rows:
@@ -553,8 +573,10 @@ class Exporter:
                 {
                     "url": row["url"],
                     "score": int(row["score"] or 0),
-                    "first_seen_at": local_str(row["first_seen_at"]),
-                    "last_seen_at": local_str(row["last_seen_at"]),
+                    # 기계가 읽는 피드라 저장된 UTC ISO-8601 을 그대로 넘깁니다.
+                    # 로컬 시간으로 바꾸면 받는 쪽이 시간대를 알 수 없습니다.
+                    "first_seen_at": row["first_seen_at"],
+                    "last_seen_at": row["last_seen_at"],
                     "host": row["host"],
                     "domain": row["domain"],
                     "category": row["category"],
@@ -562,7 +584,7 @@ class Exporter:
                     "promo_sites": " | ".join(sources),
                     "alive": alive_text.get(row["alive"], ""),
                     "http_status": row["http_status"] or "",
-                    "last_checked_at": local_str(row["last_checked_at"]),
+                    "last_checked_at": row["last_checked_at"] or "",
                     "matched_keywords": row["matched_keywords"],
                     "reasons": row["reasons"],
                     "status": row["status"],
@@ -614,41 +636,62 @@ class Exporter:
             if row["category"] != CONTACT_CATEGORY
         ]
 
+        source_map = self.storage.source_urls_grouped()
         directory = self.config.export_dir
-        full = self._save_csv(directory / "urls.csv", self._csv_rows(rows))
-        recent = self._save_csv(directory / "urls_new.csv", self._csv_rows(new_rows))
-        log.info("CSV 저장: 전체 %d행 / 최근 24시간 신규 %d행", len(rows), len(new_rows))
-        return full, recent, len(rows)
+        full = self._save_csv(directory / "urls.csv", self._csv_rows(rows, source_map))
+        recent = self._save_csv(
+            directory / "urls_new.csv", self._csv_rows(new_rows, source_map)
+        )
+        # 저장에 실패했으면 행 수도 0 으로 보고합니다. 안 그러면 파일이 없는데
+        # "N행 저장" 이라고 알려주게 됩니다.
+        written = len(rows) if full else 0
+        log.info(
+            "CSV 저장: 전체 %d행 / 최근 24시간 신규 %d행",
+            written,
+            len(new_rows) if recent else 0,
+        )
+        return full, recent, written
 
     # -- 공개 API ----------------------------------------------------------
     def export(self) -> ExportResult:
         """현재 DB 내용을 엑셀 파일로 씁니다."""
         min_score = self.config.export.min_score
+
+        # 점수 필터는 **묶은 뒤에** 겁니다. URL 단위로 먼저 자르면, 묶어서
+        # 붙는 중복 발견 가산점(묶기를 도입한 이유)이 기준선을 넘길 기회가
+        # 사라집니다. 26점짜리 두 URL 이 묶여 32점이 되는 경우가 그렇습니다.
         sites = self.storage.sites_for_export(
-            min_score, categories_excluded=(CONTACT_CATEGORY,), include_ignored=False
+            0, categories_excluded=(CONTACT_CATEGORY,), include_ignored=False
         )
         new_sites = [
             row
             for row in self.storage.sites_first_seen_since(
-                days_ago(1), min_score, include_ignored=False
+                days_ago(1), 0, include_ignored=False
             )
             if row["category"] != CONTACT_CATEGORY
         ]
         contacts = self.storage.sites_by_category(CONTACT_CATEGORY)
         summary = self.storage.summary(min_score)
 
-        site_groups = self._group(sites)
-        new_groups = self._group(new_sites)
+        # 관측 테이블은 가장 큰 테이블이라 한 번만 읽어서 돌려 씁니다.
+        source_map = self.storage.source_urls_grouped()
+
+        site_groups = [
+            group for group in self._group(sites, source_map) if group.score >= min_score
+        ]
+        new_groups = [
+            group for group in self._group(new_sites, source_map) if group.score >= min_score
+        ]
         # 연락 채널은 묶지 않습니다. t.me/계정A 와 t.me/계정B 는 호스트가 같아도
         # 서로 다른 채널이라 묶으면 한 줄로 뭉개집니다.
-        contact_groups = self._group(contacts, mode="url")
+        contact_groups = self._group(contacts, source_map, mode="url")
 
         workbook = Workbook()
         summary_sheet = workbook.active
         summary_sheet.title = "요약"
         self._write_summary_sheet(
             summary_sheet, summary, len(site_groups), len(new_groups), len(contact_groups),
-            url_count=len(sites),
+            url_count=sum(group.url_count for group in site_groups),
         )
 
         self._write_sites_sheet(workbook.create_sheet("불법사이트목록"), site_groups)

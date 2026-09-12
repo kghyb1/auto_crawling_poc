@@ -393,6 +393,9 @@ class BotDaemon:
             log.info("현재 OFF 상태입니다. `python bot.py on` 으로 수집을 시작하세요.")
 
         exit_code = 0
+        # 다음 수집 예정 시각(monotonic). 엑셀 재생성 같은 중간 요청이
+        # 이 시각을 밀어내지 않도록 따로 들고 있습니다.
+        next_run_monotonic: float | None = None
         try:
             # 켜져 있으면 시작 직후 한 번 수집합니다.
             reason = "enabled" if enabled else "off"
@@ -408,9 +411,14 @@ class BotDaemon:
                     break
 
                 if self.control.is_enabled():
-                    interval = self.config.crawl.interval_seconds
-                    jitter = random.uniform(0, self.config.crawl.jitter_seconds)
-                    wait_seconds = interval + jitter
+                    if reason == "export" and next_run_monotonic is not None:
+                        # 엑셀만 다시 만든 경우입니다. 원래 예정 시각을 유지합니다.
+                        wait_seconds = max(0.0, next_run_monotonic - time.monotonic())
+                    else:
+                        interval = self.config.crawl.interval_seconds
+                        jitter = random.uniform(0, self.config.crawl.jitter_seconds)
+                        wait_seconds = interval + jitter
+                        next_run_monotonic = time.monotonic() + wait_seconds
                     next_run = now_utc() + timedelta(seconds=wait_seconds)
                     self._update_status(
                         phase="다음 수집 대기", next_run_at=to_iso(next_run), enabled=True
@@ -420,6 +428,7 @@ class BotDaemon:
                     )
                 else:
                     wait_seconds = float(self.config.crawl.interval_seconds)
+                    next_run_monotonic = None
                     self._update_status(phase="정지(OFF)", next_run_at="", enabled=False)
 
                 self._write_heartbeat()

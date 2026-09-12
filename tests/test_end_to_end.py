@@ -451,3 +451,71 @@ class TestCsvExport:
         result = Exporter(off, bot["storage"], bot["classifier"]).export()
         assert result.csv_path is None
         assert not (bot["config"].export_dir / "urls.csv").exists()
+
+
+class TestExportRegressions:
+    """코드 리뷰에서 나온 출력 관련 버그들의 재발 방지."""
+
+    def test_group_bonus_can_lift_a_site_over_min_score(self, config, promo_server):
+        """점수 필터를 묶기 전에 걸면, 묶어서 붙는 가산점이 무의미해집니다."""
+        import dataclasses
+
+        storage = Storage(config.database_path)
+        classifier = Classifier(load_rules(config.root / "config" / "rules.yaml"))
+        try:
+            # 각각 26점(기준 30 미달)이지만 서로 다른 홍보사이트에서 발견된 같은 호스트.
+            for path, promo in (("/", "https://promo1.test/"), ("/join", "https://promo2.test/")):
+                site_id, _ = storage.record_site(
+                    f"https://target.com{path}",
+                    category="gambling",
+                    category_label="도박/베팅",
+                    base_score=26,
+                )
+                storage.record_observation(
+                    site_id, None, promo, promo, "", "a_href", False, 26
+                )
+                storage.refresh_site_score(site_id, 6, 24)
+
+            assert [row["score"] for row in storage.sites_for_export(0)] == [26, 26]
+
+            strict = dataclasses.replace(
+                config, export=dataclasses.replace(config.export, min_score=30)
+            )
+            result = Exporter(strict, storage, classifier).export()
+            sheet = load_workbook(result.path)["불법사이트목록"]
+            rows = [row for row in sheet.iter_rows(min_row=2, values_only=True)]
+
+            assert [row[1] for row in rows] == ["target.com"]
+            assert rows[0][8] == 32          # 26 + 홍보사이트 2곳 가산
+            assert rows[0][12] == 2          # 홍보사이트 수
+        finally:
+            storage.close()
+
+    def test_csv_timestamps_are_utc_iso(self, bot):
+        """기계가 읽는 피드라 시간대를 알 수 있어야 합니다."""
+        import csv
+        import re
+
+        bot["pipeline"].run_cycle()
+        result = Exporter(bot["config"], bot["storage"], bot["classifier"]).export()
+        with open(result.csv_path, encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+
+        pattern = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        assert rows, "CSV 가 비어 있습니다"
+        for row in rows:
+            assert pattern.match(row["first_seen_at"]), row["first_seen_at"]
+            assert pattern.match(row["last_seen_at"]), row["last_seen_at"]
+
+    def test_control_characters_do_not_break_the_export(self, bot):
+        """제어문자가 든 값이 DB 에 남아 있어도 엑셀 저장은 계속돼야 합니다."""
+        bot["pipeline"].run_cycle()
+        with bot["storage"]._lock:
+            bot["storage"]._conn.execute(
+                "UPDATE sites SET title = ?, memo = ? WHERE url = ?",
+                ("나쁜\x07제목", "메모\x01", "https://casino-abc777.xyz/"),
+            )
+            bot["storage"]._conn.commit()
+
+        result = Exporter(bot["config"], bot["storage"], bot["classifier"]).export()
+        assert result.path.is_file()

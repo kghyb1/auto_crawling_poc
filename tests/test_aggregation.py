@@ -215,3 +215,20 @@ class TestGroupTimestampsAndStatus:
 def test_invalid_mode_is_rejected(storage):
     with pytest.raises(ValueError):
         group_sites([], {}, mode="없는모드")
+
+
+class TestStatusPrecedence:
+    """ignored 는 '진행'이 아니라 '제외' 결정이라 신고 상태를 덮으면 안 됩니다."""
+
+    def test_ignored_does_not_override_reported(self, storage):
+        _site(storage, "https://x.com/a")
+        _site(storage, "https://x.com/b")
+        storage.set_site_status("https://x.com/a", "reported", "신고함")
+        storage.set_site_status("https://x.com/b", "ignored", "오탐")
+        assert _groups(storage)[0].status == "reported"
+
+    def test_new_wins_over_ignored(self, storage):
+        _site(storage, "https://x.com/a")
+        _site(storage, "https://x.com/b")
+        storage.set_site_status("https://x.com/b", "ignored")
+        assert _groups(storage)[0].status == "new"

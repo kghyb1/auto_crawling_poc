@@ -102,3 +102,23 @@ class TestIterUrlsInText:
 def test_tld_of():
     assert n.tld_of("https://a.b.example.xyz/p") == "xyz"
     assert n.tld_of("https://example.co.kr/") == "kr"
+
+
+class TestDeobfuscationDoesNotInventDomains:
+    """평범한 문장이 없는 도메인으로 둔갑하면 수집 결과가 오염됩니다."""
+
+    def test_english_sentence_boundaries_are_not_domains(self):
+        for sentence in (
+            "Sale ends soon. Shop now for details",
+            "We tested it. Info here",
+            "Hello world. Online casino site",
+            "Check this. Top rated",
+        ):
+            assert n.iter_urls_in_text(sentence) == [], sentence
+
+    def test_real_obfuscation_still_works(self):
+        assert n.iter_urls_in_text("접속 abc[.]com") == ["https://abc.com/"]
+        assert n.iter_urls_in_text("xyz (닷) net") == ["https://xyz.net/"]
+        assert n.iter_urls_in_text("qq · com") == ["https://qq.com/"]
+        # 마침표 *앞에* 공백이 있는 형태는 문장에서 나오지 않으므로 계속 처리합니다.
+        assert n.iter_urls_in_text("abc . com 으로") == ["https://abc.com/"]

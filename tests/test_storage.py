@@ -428,3 +428,21 @@ class TestSchemaMigration:
             assert row["sources_approved"] == 1
         finally:
             storage.close()
+
+
+class TestAliveUrlCorrection:
+    """리다이렉트로 URL 이 바뀌면 domain/host 도 같이 따라가야 합니다."""
+
+    def test_domain_and_host_follow_the_new_url(self, storage):
+        site_id, _ = _record(storage, url="https://old-domain.com/")
+        storage.update_alive(site_id, True, 200, working_url="http://totally-different.net/")
+
+        row = storage.sites_for_export(0)[0]
+        assert row["url"] == "http://totally-different.net/"
+        assert row["host"] == "totally-different.net"
+        assert row["domain"] == "totally-different.net"
+
+    def test_mark_finds_the_site_by_its_new_host(self, storage):
+        site_id, _ = _record(storage, url="https://old-domain.com/")
+        storage.update_alive(site_id, True, 200, working_url="http://new-home.net/")
+        assert storage.mark_sites("new-home.net", "reported") == ["http://new-home.net/"]
