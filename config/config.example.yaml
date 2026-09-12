@@ -100,6 +100,15 @@ export:
   # 묶으면 "여러 홍보사이트에서 발견" 가산점도 묶음 단위로 계산되어
   # 점수가 더 정확해집니다.
   group_by: "host"
+
+  # 외부 시스템(예: AI 기반 탐지 시스템)이 읽어갈 CSV 를 함께 만듭니다.
+  #   data/exports/urls.csv       전체 (URL 단위, 묶지 않음)
+  #   data/exports/urls_new.csv   최근 24시간 신규분 (증분 처리용)
+  # UTF-8 BOM 이 붙어 한글 엑셀에서도 바로 열립니다.
+  csv_enabled: true
+  # CSV 에 담을 최소 점수. 0 이면 DB 에 있는 것을 전부 넘깁니다.
+  # 뒤에서 다시 분류하는 시스템이 있다면 0 을 권합니다(놓치는 것을 줄임).
+  csv_min_score: 0
   # 엑셀에서 URL을 클릭 가능한 하이퍼링크로 만들지 여부.
   # 실수로 불법사이트에 접속하는 것을 막기 위해 기본값은 false(일반 텍스트)입니다.
   clickable_links: false

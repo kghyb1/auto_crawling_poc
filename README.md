@@ -342,6 +342,29 @@ python bot.py evaluate "https://주소/" --add   # 점수가 기준을 넘으면
 > 서로 다른 채널이라, 묶으면 한 줄로 뭉개집니다.
 
 
+### 외부 시스템 연동 (CSV)
+
+수집 결과를 다른 시스템(예: AI 기반 탐지 시스템)이 읽어가도록 CSV 도 함께 만듭니다.
+
+| 파일 | 내용 |
+|---|---|
+| `data/exports/urls.csv` | 전체 목록 |
+| `data/exports/urls_new.csv` | 최근 24시간에 처음 발견된 것만 (증분 처리용) |
+
+컬럼은 `url`, `score`, `first_seen_at`, `last_seen_at`, `host`, `domain`, `category`,
+`promo_site_count`, `promo_sites`, `alive`, `http_status`, `last_checked_at`,
+`matched_keywords`, `reasons`, `status` 입니다.
+
+- **엑셀과 달리 묶지 않고 URL 단위 그대로** 내보냅니다. 받는 쪽이 정보를 잃지 않게 하기
+  위함이고, 묶고 싶으면 `host` / `domain` 컬럼으로 직접 묶으면 됩니다.
+- 쓰는 중에 읽어도 깨지지 않도록 **임시 파일에 쓴 뒤 원자적으로 교체**합니다.
+- UTF-8 BOM 이 붙어 있어 한글 엑셀에서 바로 열립니다.
+- 연락채널과 제외 처리된 항목은 빠집니다.
+
+`export.csv_min_score: 0` 이 기본값이라 DB 에 있는 것을 전부 넘깁니다. 뒤에서 한 번 더
+거르는 시스템이 있다면 이대로 두는 것이 좋습니다.
+
+
 ---
 
 ## 명령어 정리
@@ -388,6 +411,8 @@ python bot.py evaluate "https://주소/" --add   # 점수가 기준을 넘으면
 | `discovery.max_total_sources` | 500 | 홍보사이트 전체 상한 |
 | `export.min_score` | 30 | 엑셀에 담을 최소 점수 |
 | `export.group_by` | host | 엑셀에서 같은 사이트를 묶는 기준 (host/domain/url) |
+| `export.csv_enabled` | true | 외부 시스템용 CSV 동시 생성 |
+| `export.csv_min_score` | 0 | CSV 에 담을 최소 점수 (0 = 전부) |
 | `export.clickable_links` | false | 엑셀 URL 을 클릭 가능하게 |
 | `dashboard.port` | 8787 | 관리 화면 포트 |
 | `runtime.start_enabled` | true | 봇을 처음 켰을 때 수집 ON 으로 시작할지 |

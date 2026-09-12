@@ -16,6 +16,7 @@ DB 에 남겨야 합니다(그러면 엑셀에도 계속 따라옵니다).
 
 from __future__ import annotations
 
+import csv
 import logging
 import os
 import shutil
@@ -154,6 +155,9 @@ class ExportResult:
     new_rows: int
     contacts: int
     url_rows: int = 0
+    csv_path: Path | None = None
+    csv_new_path: Path | None = None
+    csv_rows: int = 0
     warning: str = ""
 
 
@@ -518,6 +522,104 @@ class Exporter:
             except OSError:
                 continue
 
+    # -- CSV (외부 시스템 입력용) ------------------------------------------
+    #: 뒤에서 다시 분류하는 시스템이 읽어갈 컬럼. URL 이 첫 컬럼입니다.
+    CSV_COLUMNS = (
+        "url",
+        "score",
+        "first_seen_at",
+        "last_seen_at",
+        "host",
+        "domain",
+        "category",
+        "promo_site_count",
+        "promo_sites",
+        "alive",
+        "http_status",
+        "last_checked_at",
+        "matched_keywords",
+        "reasons",
+        "status",
+    )
+
+    def _csv_rows(self, rows: Sequence[sqlite3.Row]) -> list[dict[str, Any]]:
+        """DB 행을 CSV 한 줄씩으로 바꿉니다 (묶지 않고 URL 단위 그대로)."""
+        source_map = self.storage.source_urls_grouped()
+        alive_text = {1: "alive", 0: "dead", None: ""}
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            sources = source_map.get(int(row["id"]), [])
+            output.append(
+                {
+                    "url": row["url"],
+                    "score": int(row["score"] or 0),
+                    "first_seen_at": local_str(row["first_seen_at"]),
+                    "last_seen_at": local_str(row["last_seen_at"]),
+                    "host": row["host"],
+                    "domain": row["domain"],
+                    "category": row["category"],
+                    "promo_site_count": int(row["distinct_sources"] or 0),
+                    "promo_sites": " | ".join(sources),
+                    "alive": alive_text.get(row["alive"], ""),
+                    "http_status": row["http_status"] or "",
+                    "last_checked_at": local_str(row["last_checked_at"]),
+                    "matched_keywords": row["matched_keywords"],
+                    "reasons": row["reasons"],
+                    "status": row["status"],
+                }
+            )
+        return output
+
+    def _save_csv(self, target: Path, rows: Sequence[dict[str, Any]]) -> Path | None:
+        """임시 파일에 쓴 뒤 교체합니다.
+
+        읽는 쪽이 절반만 쓰인 파일을 집어가지 않도록 원자적으로 바꿉니다.
+        한글 엑셀에서 바로 열리도록 UTF-8 BOM(utf-8-sig)을 붙입니다.
+        """
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(dir=str(target.parent), prefix=".csv-", suffix=".csv")
+        os.close(fd)
+        temp_path = Path(temp_name)
+        try:
+            with temp_path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(self.CSV_COLUMNS))
+                writer.writeheader()
+                writer.writerows(rows)
+            os.replace(temp_path, target)
+            return target
+        except OSError as exc:
+            temp_path.unlink(missing_ok=True)
+            log.warning("CSV 저장 실패 %s: %s", target, exc)
+            return None
+
+    def export_csv(self) -> tuple[Path | None, Path | None, int]:
+        """외부 시스템이 읽어갈 CSV 를 만듭니다. ``(전체, 신규, 행 수)``.
+
+        엑셀과 달리 **묶지 않고 URL 단위 그대로** 내보냅니다. 뒤에서 다시
+        분류하는 쪽이 정보를 잃지 않게 하기 위함이고, 묶고 싶으면 host/domain
+        컬럼으로 직접 묶을 수 있습니다.
+        """
+        if not self.config.export.csv_enabled:
+            return None, None, 0
+
+        min_score = self.config.export.csv_min_score
+        rows = self.storage.sites_for_export(
+            min_score, categories_excluded=(CONTACT_CATEGORY,), include_ignored=False
+        )
+        new_rows = [
+            row
+            for row in self.storage.sites_first_seen_since(
+                days_ago(1), min_score, include_ignored=False
+            )
+            if row["category"] != CONTACT_CATEGORY
+        ]
+
+        directory = self.config.export_dir
+        full = self._save_csv(directory / "urls.csv", self._csv_rows(rows))
+        recent = self._save_csv(directory / "urls_new.csv", self._csv_rows(new_rows))
+        log.info("CSV 저장: 전체 %d행 / 최근 24시간 신규 %d행", len(rows), len(new_rows))
+        return full, recent, len(rows)
+
     # -- 공개 API ----------------------------------------------------------
     def export(self) -> ExportResult:
         """현재 DB 내용을 엑셀 파일로 씁니다."""
@@ -573,6 +675,7 @@ class Exporter:
         target = self.config.export_path
         saved_path, warning = self._save_workbook(workbook, target)
         snapshot = self._write_snapshot(saved_path) if not warning else None
+        csv_path, csv_new_path, csv_rows = self.export_csv()
 
         log.info(
             "엑셀 저장 완료: %s (%s 기준 %d건 / URL %d건 / 신규 %d건 / 연락채널 %d건)",
@@ -590,5 +693,8 @@ class Exporter:
             new_rows=len(new_groups),
             contacts=len(contact_groups),
             url_rows=len(sites),
+            csv_path=csv_path,
+            csv_new_path=csv_new_path,
+            csv_rows=csv_rows,
             warning=warning,
         )

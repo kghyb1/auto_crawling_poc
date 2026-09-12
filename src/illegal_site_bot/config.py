@@ -74,6 +74,8 @@ DEFAULTS: dict[str, Any] = {
         "snapshot_retention_days": 90,
         "min_score": 30,
         "group_by": "host",
+        "csv_enabled": True,
+        "csv_min_score": 0,
         "clickable_links": False,
         "always_rewrite": False,
     },
@@ -185,6 +187,8 @@ class ExportConfig:
     snapshot_retention_days: int
     min_score: int
     group_by: str
+    csv_enabled: bool
+    csv_min_score: int
     clickable_links: bool
     always_rewrite: bool
 
@@ -316,6 +320,8 @@ def _validate(config: Config) -> None:
         raise ConfigError("crawl.max_pages_per_source 는 1 이상이어야 합니다.")
     if not 0 <= config.export.min_score <= 100:
         raise ConfigError("export.min_score 는 0~100 범위여야 합니다.")
+    if not 0 <= config.export.csv_min_score <= 100:
+        raise ConfigError("export.csv_min_score 는 0~100 범위여야 합니다.")
     if config.export.group_by not in GROUP_MODES:
         raise ConfigError(
             f"export.group_by 는 {', '.join(GROUP_MODES)} 중 하나여야 합니다."

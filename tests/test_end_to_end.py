@@ -364,3 +364,90 @@ class TestDiscoveryLoop:
         assert candidate[5] == 1                      # 깊이
         assert "이미 수집된 불법사이트" in candidate[6]  # 판별 근거
         assert candidate[7] == loop["seed"]           # 발견 경로
+
+
+class TestCsvExport:
+    """외부 시스템(AI 재분류)이 읽어갈 CSV."""
+
+    @pytest.fixture
+    def exported(self, bot):
+        bot["pipeline"].run_cycle()
+        return Exporter(bot["config"], bot["storage"], bot["classifier"]).export()
+
+    def _rows(self, path):
+        import csv
+
+        with open(path, encoding="utf-8-sig", newline="") as handle:
+            return list(csv.DictReader(handle))
+
+    def test_creates_both_csv_files(self, exported, config):
+        assert exported.csv_path == config.export_dir / "urls.csv"
+        assert exported.csv_new_path == config.export_dir / "urls_new.csv"
+        assert exported.csv_path.is_file() and exported.csv_new_path.is_file()
+
+    def test_has_the_requested_columns_with_url_first(self, exported):
+        rows = self._rows(exported.csv_path)
+        columns = list(rows[0].keys())
+        assert columns[:4] == ["url", "score", "first_seen_at", "last_seen_at"]
+        for required in ("host", "domain", "category", "alive", "promo_sites"):
+            assert required in columns
+
+    def test_starts_with_utf8_bom_so_excel_opens_it(self, exported):
+        # BOM 이 없으면 한글 엑셀에서 글자가 깨집니다.
+        assert exported.csv_path.read_bytes()[:3] == b"\xef\xbb\xbf"
+
+    def test_rows_are_per_url_not_grouped(self, exported):
+        """엑셀은 호스트 단위로 묶지만 CSV 는 원본 URL 을 그대로 넘깁니다."""
+        urls = [row["url"] for row in self._rows(exported.csv_path)]
+        assert "http://toto-safe-999.top/join" in urls
+        assert "https://holdem-king.cc/lobby" in urls
+
+    def test_score_and_timestamps_are_filled(self, exported):
+        row = next(
+            row for row in self._rows(exported.csv_path)
+            if row["url"] == "https://casino-abc777.xyz/"
+        )
+        assert int(row["score"]) > 0
+        assert row["first_seen_at"] and row["last_seen_at"]
+        assert row["category"] == "gambling"
+        assert row["promo_sites"]
+
+    def test_contacts_are_not_in_the_feed(self, exported):
+        urls = [row["url"] for row in self._rows(exported.csv_path)]
+        assert not any("t.me" in url for url in urls)
+
+    def test_reclassified_sites_are_excluded(self, bot):
+        bot["pipeline"].run_cycle()
+        bot["storage"].set_site_status("https://casino-abc777.xyz/", "ignored", "오탐")
+        result = Exporter(bot["config"], bot["storage"], bot["classifier"]).export()
+        urls = [row["url"] for row in self._rows(result.csv_path)]
+        assert "https://casino-abc777.xyz/" not in urls
+
+    def test_new_file_holds_only_recent_finds(self, exported):
+        full = self._rows(exported.csv_path)
+        recent = self._rows(exported.csv_new_path)
+        assert 0 < len(recent) <= len(full)
+
+    def test_min_score_filter(self, bot):
+        import dataclasses
+
+        strict = dataclasses.replace(
+            bot["config"],
+            export=dataclasses.replace(bot["config"].export, csv_min_score=90),
+        )
+        bot["pipeline"].run_cycle()
+        result = Exporter(strict, bot["storage"], bot["classifier"]).export()
+        scores = [int(row["score"]) for row in self._rows(result.csv_path)]
+        assert scores and all(score >= 90 for score in scores)
+
+    def test_can_be_turned_off(self, bot):
+        import dataclasses
+
+        off = dataclasses.replace(
+            bot["config"],
+            export=dataclasses.replace(bot["config"].export, csv_enabled=False),
+        )
+        bot["pipeline"].run_cycle()
+        result = Exporter(off, bot["storage"], bot["classifier"]).export()
+        assert result.csv_path is None
+        assert not (bot["config"].export_dir / "urls.csv").exists()

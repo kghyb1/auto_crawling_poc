@@ -377,6 +377,10 @@ def cmd_export(args: argparse.Namespace, config: Config) -> int:
         result = Exporter(config, storage, classifier).export()
         print(f"엑셀을 만들었습니다: {result.path}")
         print(f"  수록 {result.rows}건 / 최근 24시간 신규 {result.new_rows}건 / 연락채널 {result.contacts}건")
+        if result.csv_path:
+            print(f"  CSV(외부 시스템용): {result.csv_path}  [{result.csv_rows}행]")
+        if result.csv_new_path:
+            print(f"  CSV(최근 24시간 신규): {result.csv_new_path}")
         if result.snapshot:
             print(f"  일별 스냅샷: {result.snapshot}")
         if result.warning:
