@@ -144,6 +144,7 @@ RUN_COLUMNS: tuple[tuple[str, int], ...] = (
     ("갱신", 8),
     ("신규후보", 9),
     ("자동승인", 9),
+    ("외국어제외", 11),
     ("비고", 40),
 )
 
@@ -387,12 +388,13 @@ class Exporter:
                     "updated_sites",
                     "candidates_added",
                     "sources_approved",
+                    "dropped_foreign",
                 ),
                 start=4,
             ):
                 cell = sheet.cell(row=excel_row, column=offset, value=int(row[key] or 0))
                 cell.alignment = Alignment(horizontal="center")
-            sheet.cell(row=excel_row, column=13, value=_safe(row["note"]))
+            sheet.cell(row=excel_row, column=14, value=_safe(row["note"]))
 
     def _write_summary_sheet(
         self,
@@ -429,6 +431,7 @@ class Exporter:
             ("신고 완료 처리", int(summary.get("reported") or 0)),
             ("제외 처리(오탐/홍보사이트 재분류)", int(summary.get("ignored") or 0)),
             ("연락 채널(텔레그램 등)", contacts),
+            ("외국어로 제외한 도메인", int(summary.get("foreign_domains") or 0)),
             ("홍보사이트 등록/사용", f"{summary.get('sources_total', 0)} / {summary.get('sources_enabled', 0)}"),
             ("  그중 자동 발견", int(summary.get("sources_auto") or 0)),
             ("승인 대기 후보", int(summary.get("candidates_pending") or 0)),
@@ -551,6 +554,7 @@ class Exporter:
         "host",
         "domain",
         "category",
+        "language",
         "promo_site_count",
         "promo_sites",
         "alive",
@@ -580,6 +584,7 @@ class Exporter:
                     "host": row["host"],
                     "domain": row["domain"],
                     "category": row["category"],
+                    "language": row["language"],
                     "promo_site_count": int(row["distinct_sources"] or 0),
                     "promo_sites": " | ".join(sources),
                     "alive": alive_text.get(row["alive"], ""),

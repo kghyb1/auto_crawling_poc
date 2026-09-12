@@ -519,3 +519,124 @@ class TestExportRegressions:
 
         result = Exporter(bot["config"], bot["storage"], bot["classifier"]).export()
         assert result.path.is_file()
+
+
+class TestLanguageFilterInPipeline:
+    """수집 사이클에서 외국어 사이트가 DB 에 저장되지 않는지."""
+
+    @pytest.fixture
+    def bot_with_language(self, config, promo_server, partner_server):
+        from illegal_site_bot.language import LanguageDetector
+
+        storage = Storage(config.database_path)
+        classifier = Classifier(load_rules(config.root / "config" / "rules.yaml"))
+        fetcher = Fetcher(config.crawl)
+        language = LanguageDetector(
+            config.language_filter, fetcher=fetcher, storage=storage
+        )
+        pipeline = Pipeline(
+            config=config,
+            storage=storage,
+            classifier=classifier,
+            fetcher=fetcher,
+            pagination_patterns=("page=", "board"),
+            language=language,
+        )
+        storage.upsert_source(promo_server, name="시드")
+        try:
+            yield {
+                "config": config,
+                "storage": storage,
+                "classifier": classifier,
+                "pipeline": pipeline,
+                "language": language,
+                "partner": partner_server,
+            }
+        finally:
+            fetcher.close()
+            storage.close()
+
+    def _seed_pages(self, bot, korean: bool) -> None:
+        """수집 대상에 한국어/영어 페이지를 직접 등록해 사이클을 돌립니다."""
+        page = "korean" if korean else "english"
+        bot["storage"].upsert_source(bot["partner"] + page, name=page)
+
+    def test_english_page_is_judged_foreign(self, config, bot_with_language):
+        """로컬 픽스처의 영어 페이지를 실제로 받아 판별합니다."""
+        import dataclasses
+
+        from illegal_site_bot.language import LanguageDetector
+
+        bot = bot_with_language
+        settings = dataclasses.replace(
+            config.language_filter, fetch_when_unknown=True
+        )
+        detector = LanguageDetector(
+            settings, fetcher=bot["pipeline"].fetcher, storage=bot["storage"]
+        )
+        detector.begin_cycle()
+        allowed, verdict = detector.allows(bot_with_language["partner"] + "english")
+        assert allowed is False and verdict.language == "foreign"
+
+    def test_korean_sites_are_still_collected(self, bot_with_language):
+        bot = bot_with_language
+        bot["pipeline"].run_cycle()
+        urls = {row["url"] for row in bot["storage"].sites_for_export(0)}
+        # 기존 픽스처의 도박 사이트들은 .xyz/.top 이라 접속 판별 대상이지만,
+        # 접속되지 않으므로 '판별 불가 → 보존' 규칙에 따라 남아야 합니다.
+        assert "https://casino-abc777.xyz/" in urls
+
+    def test_contact_channels_bypass_the_filter(self, bot_with_language):
+        """t.me 는 언어가 없는 대상이라 필터에 걸리면 안 됩니다."""
+        bot = bot_with_language
+        bot["pipeline"].run_cycle()
+        urls = {row["url"] for row in bot["storage"].sites_for_export(0)}
+        assert "https://t.me/promo_admin_contact" in urls
+
+    def test_dropped_count_is_reported(self, bot_with_language):
+        bot = bot_with_language
+        # 영어 사이트를 확실히 후보로 만들기 위해 캐시에 심어둡니다.
+        bot["storage"].record_domain_language(
+            "casino-abc777.xyz", language="foreign", reason="테스트"
+        )
+        stats = bot["pipeline"].run_cycle()
+        assert stats.dropped_foreign >= 1
+
+        urls = {row["url"] for row in bot["storage"].sites_for_export(0)}
+        assert "https://casino-abc777.xyz/" not in urls
+
+    def test_filter_off_keeps_everything(self, config, promo_server):
+        import dataclasses
+
+        from illegal_site_bot.language import LanguageDetector
+
+        off = dataclasses.replace(
+            config,
+            language_filter=dataclasses.replace(config.language_filter, enabled=False),
+        )
+        storage = Storage(off.database_path)
+        classifier = Classifier(load_rules(off.root / "config" / "rules.yaml"))
+        fetcher = Fetcher(off.crawl)
+        try:
+            storage.record_domain_language(
+                "casino-abc777.xyz", language="foreign", reason="테스트"
+            )
+            pipeline = Pipeline(
+                config=off,
+                storage=storage,
+                classifier=classifier,
+                fetcher=fetcher,
+                pagination_patterns=("page=", "board"),
+                language=LanguageDetector(
+                    off.language_filter, fetcher=fetcher, storage=storage
+                ),
+            )
+            storage.upsert_source(promo_server, name="시드")
+            stats = pipeline.run_cycle()
+
+            assert stats.dropped_foreign == 0
+            urls = {row["url"] for row in storage.sites_for_export(0)}
+            assert "https://casino-abc777.xyz/" in urls
+        finally:
+            fetcher.close()
+            storage.close()

@@ -44,6 +44,9 @@ class FetchResult:
     error: str = ""
     elapsed_ms: int = 0
     content_type: str = ""
+    #: 본문을 해석하는 데 실제로 쓴 인코딩. cp949/euc-kr 이면 한국어 사이트라는
+    #: 강한 신호라서 밖으로 꺼내 씁니다.
+    encoding: str = ""
     redirect_chain: list[str] = field(default_factory=list)
     skipped_by_robots: bool = False
 
@@ -159,8 +162,11 @@ class Fetcher:
         )
 
     # -- 내부 유틸 ---------------------------------------------------------
-    def _decode(self, response: requests.Response, body: bytes) -> str:
-        """한글 사이트의 EUC-KR/CP949 를 포함해 본문을 문자열로 만듭니다."""
+    def _decode(self, response: requests.Response, body: bytes) -> tuple[str, str]:
+        """본문을 문자열로 만들고, 실제로 쓴 인코딩 이름을 함께 돌려줍니다.
+
+        한글 사이트의 EUC-KR/CP949 를 자동 판별합니다.
+        """
         candidates: list[str] = []
 
         match = _META_CHARSET_RE.search(body[:4096])
@@ -180,10 +186,10 @@ class Fetcher:
             if normalized in {"euc-kr", "ks_c_5601-1987", "ksc5601", "korean"}:
                 normalized = "cp949"
             try:
-                return body.decode(normalized)
+                return body.decode(normalized), normalized
             except (LookupError, UnicodeDecodeError):
                 continue
-        return body.decode("utf-8", "replace")
+        return body.decode("utf-8", "replace"), "utf-8"
 
     def _read_capped(self, response: requests.Response) -> bytes:
         limit = self.config.max_response_bytes
@@ -251,7 +257,7 @@ class Fetcher:
                     break
 
                 body = self._read_capped(response)
-                result.html = self._decode(response, body)
+                result.html, result.encoding = self._decode(response, body)
                 result.error = ""
                 break
             finally:

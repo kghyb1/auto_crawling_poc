@@ -27,6 +27,7 @@ from .control import Control
 from .discovery import Discovery
 from .exporter import Exporter
 from .fetcher import Fetcher
+from .language import LanguageDetector
 from .pipeline import Pipeline
 from .renderer import Renderer
 from .storage import RunStats, Storage
@@ -56,6 +57,7 @@ class LastCycle:
     updated_sites: int = 0
     candidates_added: int = 0
     sources_approved: int = 0
+    dropped_foreign: int = 0
     export_path: str = ""
     error: str = ""
     note: str = ""
@@ -96,6 +98,9 @@ class BotDaemon:
             classifier=self.classifier,
             fetcher=self.fetcher,
         )
+        self.language = LanguageDetector(
+            config.language_filter, fetcher=self.fetcher, storage=self.storage
+        )
         self.pipeline = Pipeline(
             config=config,
             storage=self.storage,
@@ -104,6 +109,7 @@ class BotDaemon:
             renderer=self.renderer,
             pagination_patterns=targets.pagination_patterns,
             discovery=self.discovery,
+            language=self.language,
         )
         self.exporter = Exporter(config, self.storage, self.classifier)
 
@@ -263,6 +269,7 @@ class BotDaemon:
         summary.updated_sites = stats.updated_sites
         summary.candidates_added = stats.candidates_added
         summary.sources_approved = stats.sources_approved
+        summary.dropped_foreign = stats.dropped_foreign
         summary.note = stats.note
 
         # 생존 확인 (설정한 주기마다)
@@ -302,7 +309,8 @@ class BotDaemon:
                 log.exception("이력 정리 중 예외")
 
         log.info(
-            "=== 사이클 종료: 대상 %d곳(성공 %d/실패 %d), 페이지 %d, 후보 %d, 신규 %d, 갱신 %d, %.1f초 ===",
+            "=== 사이클 종료: 대상 %d곳(성공 %d/실패 %d), 페이지 %d, 후보 %d, "
+            "신규 %d, 갱신 %d, 외국어 제외 %d, %.1f초 ===",
             stats.sources_total,
             stats.sources_ok,
             stats.sources_failed,
@@ -310,6 +318,7 @@ class BotDaemon:
             stats.candidates_found,
             stats.new_sites,
             stats.updated_sites,
+            stats.dropped_foreign,
             summary.duration_seconds,
         )
         with self._status_lock:

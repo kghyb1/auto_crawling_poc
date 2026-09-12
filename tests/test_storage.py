@@ -416,6 +416,47 @@ class TestSchemaMigration:
         finally:
             storage.close()
 
+    def test_v3_language_columns_are_added(self, v1_database):
+        """v1 → v3 로 한 번에 올라가도 언어 필터용 컬럼이 준비돼야 합니다."""
+        storage = Storage(v1_database)
+        try:
+            storage.record_domain_language(
+                "foreign-site.com", language="foreign", reason="한글 비율 0%"
+            )
+            row = storage.domain_language("foreign-site.com")
+            assert row is not None and row["language"] == "foreign"
+
+            site_id, _ = storage.record_site(
+                "https://ko-site.com/",
+                category="gambling",
+                category_label="도박/베팅",
+                base_score=60,
+                language="ko",
+            )
+            assert site_id
+            assert storage.sites_for_export(0, include_ignored=True)[0]["language"] in {
+                "ko",
+                "",
+            }
+        finally:
+            storage.close()
+
+    def test_language_cache_expires(self, v1_database):
+        storage = Storage(v1_database)
+        try:
+            storage.record_domain_language("x.com", language="foreign")
+            assert storage.domain_language("x.com", max_age_days=90) is not None
+            with storage._lock:  # 오래된 판별로 만들어 둡니다
+                storage._conn.execute(
+                    "UPDATE domain_language SET checked_at = ? WHERE domain = 'x.com'",
+                    (days_ago(200),),
+                )
+                storage._conn.commit()
+            assert storage.domain_language("x.com", max_age_days=90) is None
+            assert storage.domain_language("x.com", max_age_days=0) is not None
+        finally:
+            storage.close()
+
     def test_runs_table_gains_discovery_counters(self, v1_database):
         storage = Storage(v1_database)
         try:

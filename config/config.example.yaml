@@ -83,6 +83,32 @@ discovery:
   auto_disable_after_failures: 10  # 연속 실패가 이만큼이면 수집에서 자동 제외
   mirror_similarity: 0.8         # 링크 구성이 이만큼 겹치면 복제 사이트로 보고 제외
 
+language_filter:
+  # 한국어 사이트만 DB 에 저장합니다. 외국어로 판정된 사이트는 저장하지 않습니다.
+  enabled: true
+  keep: ["ko"]
+
+  # 접속 없이 TLD 만으로 판정하는 목록
+  korean_tlds: ["kr"]
+  # 여기 있는 TLD 는 접속 없이 바로 제외합니다. 되돌릴 수 없으니 보수적으로.
+  foreign_tlds: ["jp", "cn", "tw", "ru", "vn", "th", "de", "fr", "it", "es",
+                 "nl", "pl", "tr", "ua", "br", "mx", "ir", "sa"]
+
+  # .com/.xyz 처럼 TLD 로 모르는 경우 페이지를 1회 받아서 확인합니다.
+  # 한국 불법사이트 대다수가 여기 해당하므로 끄면 필터가 거의 동작하지 않습니다.
+  fetch_when_unknown: true
+  # 글자 중 한글 비율이 이 값 이상이면 한국어로 봅니다.
+  # (EUC-KR/CP949 인코딩이면 비율과 무관하게 한국어로 판정)
+  min_hangul_ratio: 0.05
+  # 한 사이클에서 언어 판별에 쓸 최대 요청 수. 초과분은 다음 사이클로 미룹니다.
+  max_checks_per_cycle: 30
+
+  # 판별하지 못한 경우(접속 실패, 자바스크립트 전용 페이지) 어떻게 할지.
+  # true 면 보존합니다. 모르는 것을 버리면 조용히 놓치기 때문에 기본값이 true 입니다.
+  keep_when_undetermined: true
+  # 판별 결과를 다시 확인하기까지의 기간
+  recheck_after_days: 90
+
 export:
   directory: "data/exports"
   filename: "불법사이트_URL목록.xlsx"

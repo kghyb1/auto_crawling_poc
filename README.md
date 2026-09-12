@@ -291,6 +291,67 @@ python bot.py evaluate "https://주소/" --add   # 점수가 기준을 넘으면
 
 ---
 
+## 한국어 사이트만 수집하기 (언어 필터)
+
+외국어 사이트는 **DB 에 저장하지 않습니다.** 기본으로 켜져 있고,
+`language_filter.enabled: false` 로 끄면 예전처럼 전부 저장합니다.
+
+### 판별 방식
+
+저장 여부를 정하는 시점에 봇은 그 사이트에 **아직 접속한 적이 없습니다.**
+홍보사이트 HTML 에서 링크만 뽑은 상태라 링크 텍스트밖에 없는데, 그건
+*홍보사이트의* 언어이지 대상 사이트의 언어가 아닙니다. 한국 홍보사이트가
+외국 서버 도박사이트를 한글 배너로 링크하는 경우가 흔하기 때문입니다.
+
+그래서 3단계로 나눠 요청을 아낍니다.
+
+| 단계 | 방법 | 요청 |
+|---|---|---|
+| 1 | `.kr` 계열은 통과, 명백한 외국 ccTLD 는 제외 | 0회 |
+| 2 | 나머지는 페이지를 1회 받아 판별 | 후보당 1회 |
+| 3 | 판정 결과를 **등록가능도메인 단위로 캐시** | 이후 0회 |
+
+2단계에서 보는 신호는 이렇습니다.
+
+- **응답 인코딩이 EUC-KR/CP949** → 본문과 무관하게 한국어로 확정
+- **한글 비율** — 글자 중 한글이 `min_hangul_ratio`(기본 5%) 이상
+- `<html lang="ko">` / Content-Language
+
+한자·가나는 한글로 세지 않으므로 일본어·중국어 사이트와 구분됩니다.
+
+### 판별하지 못한 경우는 보존합니다
+
+접속 실패, 자바스크립트 전용 페이지, 빈 본문은 **"외국어"가 아니라 "판별 불가"**
+로 처리하고 그대로 저장합니다. 모르는 것을 버리면 조용히 놓치기 때문입니다.
+`keep_when_undetermined: false` 로 바꾸면 버립니다.
+
+### 버린 것을 확인하는 방법
+
+DB 저장을 막는 것은 되돌릴 수 없으므로, 무엇을 왜 버렸는지 세 곳에 남깁니다.
+
+```
+로그        외국어로 판단해 저장하지 않음: https://... (한글 비율 0%, html lang=en)
+사이클 로그  === 사이클 종료: ... 외국어 제외 12, 8.3초 ===
+엑셀        실행이력 시트의 '외국어제외' 열 / 요약의 '외국어로 제외한 도메인'
+상태        python bot.py status 의 '외국어로 제외'
+```
+
+며칠 돌려보고 잘못 버리는 것이 보이면 `min_hangul_ratio` 를 낮추거나
+`foreign_tlds` 에서 해당 TLD 를 빼세요.
+
+### 알아둘 점
+
+- **연락채널(텔레그램 등)은 필터를 적용하지 않습니다.** 언어가 없는 대상이라
+  적용하면 전부 사라집니다.
+- 판별은 **도메인 단위**입니다. 한 도메인에 한국어·영어 페이지가 섞여 있으면
+  먼저 본 쪽으로 정해집니다.
+- `.com` 을 쓰는 한국 불법사이트가 대다수라 TLD 만으로는 거의 걸러지지 않고,
+  실제로는 후보 도메인마다 요청이 1회씩 늘어납니다. `max_checks_per_cycle`
+  로 제한하며, 초과분은 판별하지 않고 보존한 뒤 다음 사이클로 미룹니다.
+
+
+---
+
 ## 엑셀 결과물
 
 `data/exports/불법사이트_URL목록.xlsx` (+ 날짜별 스냅샷 `..._20260910.xlsx`)
@@ -409,6 +470,10 @@ python bot.py evaluate "https://주소/" --add   # 점수가 기준을 넘으면
 | `discovery.auto_approve` | false | 사람 확인 없이 바로 수집 대상에 추가 |
 | `discovery.max_depth` | 2 | 시드에서 몇 홉까지 탐색할지 |
 | `discovery.max_total_sources` | 500 | 홍보사이트 전체 상한 |
+| `language_filter.enabled` | true | 한국어 사이트만 저장 |
+| `language_filter.min_hangul_ratio` | 0.05 | 한국어로 볼 최소 한글 비율 |
+| `language_filter.max_checks_per_cycle` | 30 | 언어 판별용 요청 예산 |
+| `language_filter.keep_when_undetermined` | true | 판별 실패 시 보존 |
 | `export.min_score` | 30 | 엑셀에 담을 최소 점수 |
 | `export.group_by` | host | 엑셀에서 같은 사이트를 묶는 기준 (host/domain/url) |
 | `export.csv_enabled` | true | 외부 시스템용 CSV 동시 생성 |
@@ -495,6 +560,7 @@ auto_crawling_poc/
 │   ├── extractor.py              HTML → 링크 후보 추출
 │   ├── normalizer.py             URL 정규화·난독화 해제·도메인 추출
 │   ├── classifier.py             규칙 적용 → 점수·카테고리
+│   ├── language.py               언어 판별 (한국어 사이트만 저장)
 │   ├── storage.py                SQLite 저장
 │   ├── exporter.py               엑셀 출력
 │   ├── targets.py                targets.yaml 로딩

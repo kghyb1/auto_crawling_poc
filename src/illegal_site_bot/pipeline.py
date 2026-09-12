@@ -21,6 +21,7 @@ from .config import Config
 from .discovery import Discovery
 from .extractor import Candidate, extract, extract_meta_redirect
 from .fetcher import Fetcher
+from .language import LanguageDetector
 from .normalizer import normalize_url, registrable_domain, same_site
 from .renderer import Renderer
 from .storage import RunStats, SourceRow, Storage
@@ -63,6 +64,7 @@ class Pipeline:
         renderer: Renderer | None = None,
         pagination_patterns: tuple[str, ...] = (),
         discovery: Discovery | None = None,
+        language: LanguageDetector | None = None,
     ) -> None:
         self.config = config
         self.storage = storage
@@ -71,6 +73,7 @@ class Pipeline:
         self.renderer = renderer
         self.pagination_patterns = pagination_patterns
         self.discovery = discovery
+        self.language = language
         self._redirect_budget = 0
         self._budget_lock = threading.Lock()
 
@@ -231,6 +234,23 @@ class Pipeline:
             if verdict.score < rules.candidate_threshold and not verdict.always_keep:
                 continue
 
+            # 언어 필터 — 한국어 사이트만 저장합니다.
+            # 연락 채널(텔레그램 등)은 언어를 따질 대상이 아니라 건너뜁니다.
+            language_code = ""
+            if self.language is not None and not verdict.always_keep:
+                allowed, language_verdict = self.language.allows(candidate.url)
+                language_code = language_verdict.language
+                if not allowed:
+                    stats.dropped_foreign += 1
+                    # 저장을 막는 것은 되돌릴 수 없으므로 무엇을 왜 버렸는지
+                    # 반드시 남깁니다.
+                    log.info(
+                        "외국어로 판단해 저장하지 않음: %s (%s)",
+                        candidate.url,
+                        language_verdict.reason,
+                    )
+                    continue
+
             site_id, is_new = self.storage.record_site(
                 candidate.url,
                 category=verdict.category,
@@ -240,6 +260,7 @@ class Pipeline:
                 reasons=verdict.reasons_text,
                 title="",
                 redirect_from=via,
+                language=language_code,
             )
             self.storage.record_observation(
                 site_id=site_id,
@@ -307,6 +328,8 @@ class Pipeline:
         self._redirect_budget = self.config.crawl.max_redirect_resolutions
         if self.discovery is not None:
             self.discovery.begin_cycle()
+        if self.language is not None:
+            self.language.begin_cycle()
 
         needs_render = [
             source

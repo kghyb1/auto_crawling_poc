@@ -19,7 +19,7 @@ from .timeutil import days_ago, iso_now
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SITE_STATUSES = ("new", "confirmed", "reported", "ignored")
 
@@ -90,7 +90,21 @@ CREATE TABLE IF NOT EXISTS sites (
     http_status      INTEGER,
     last_checked_at  TEXT,
     status           TEXT NOT NULL DEFAULT 'new',
-    memo             TEXT NOT NULL DEFAULT ''
+    memo             TEXT NOT NULL DEFAULT '',
+    -- 스키마 v3(언어 필터)
+    language         TEXT NOT NULL DEFAULT ''
+);
+
+-- 도메인별 언어 판별 결과 캐시.
+-- 외국어로 판정해 sites 에 저장하지 않은 도메인도 여기에는 남습니다.
+-- 그래야 매 사이클 같은 도메인을 다시 받아보지 않습니다.
+CREATE TABLE IF NOT EXISTS domain_language (
+    domain       TEXT PRIMARY KEY,
+    language     TEXT NOT NULL,
+    reason       TEXT NOT NULL DEFAULT '',
+    hangul_ratio REAL NOT NULL DEFAULT 0,
+    encoding     TEXT NOT NULL DEFAULT '',
+    checked_at   TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_sites_domain      ON sites(domain);
@@ -129,7 +143,8 @@ CREATE TABLE IF NOT EXISTS runs (
     duration_ms      INTEGER,
     note             TEXT NOT NULL DEFAULT '',
     candidates_added INTEGER NOT NULL DEFAULT 0,
-    sources_approved INTEGER NOT NULL DEFAULT 0
+    sources_approved INTEGER NOT NULL DEFAULT 0,
+    dropped_foreign  INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -162,6 +177,12 @@ _V2_COLUMNS: dict[str, dict[str, str]] = {
         "candidates_added": "INTEGER NOT NULL DEFAULT 0",
         "sources_approved": "INTEGER NOT NULL DEFAULT 0",
     },
+}
+
+#: 스키마 v3(언어 필터)에서 추가되는 컬럼.
+_V3_COLUMNS: dict[str, dict[str, str]] = {
+    "sites": {"language": "TEXT NOT NULL DEFAULT ''"},
+    "runs": {"dropped_foreign": "INTEGER NOT NULL DEFAULT 0"},
 }
 
 
@@ -212,6 +233,7 @@ class RunStats:
     updated_sites: int = 0
     candidates_added: int = 0
     sources_approved: int = 0
+    dropped_foreign: int = 0
     note: str = ""
 
 
@@ -261,8 +283,9 @@ class Storage:
             # CREATE TABLE IF NOT EXISTS 는 이미 있는 테이블을 바꾸지 않기 때문에
             # 여기서 따로 처리해야 합니다.
             added: list[str] = []
-            for table, columns in _V2_COLUMNS.items():
-                added.extend(self._ensure_columns(table, columns))
+            for schema in (_V2_COLUMNS, _V3_COLUMNS):
+                for table, columns in schema.items():
+                    added.extend(self._ensure_columns(table, columns))
             if added:
                 log.info("DB 스키마를 v%d 로 올렸습니다: %s", SCHEMA_VERSION, ", ".join(added))
 
@@ -701,6 +724,7 @@ class Storage:
         reasons: str = "",
         title: str = "",
         redirect_from: str = "",
+        language: str = "",
     ) -> tuple[int, bool]:
         """사이트를 등록하거나 갱신합니다. ``(site_id, 신규여부)``."""
         now = iso_now()
@@ -720,8 +744,8 @@ class Storage:
                     INSERT INTO sites (
                         url, domain, host, category, category_label, base_score, score,
                         matched_keywords, reasons, title, first_seen_at, last_seen_at,
-                        seen_count, distinct_sources, redirect_from, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, 'new')
+                        seen_count, distinct_sources, redirect_from, status, language
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, 'new', ?)
                     """,
                     (
                         url,
@@ -737,6 +761,7 @@ class Storage:
                         now,
                         now,
                         redirect_from,
+                        language,
                     ),
                 )
                 self._conn.commit()
@@ -760,7 +785,8 @@ class Storage:
                        reasons = CASE WHEN ? <> '' THEN ? ELSE reasons END,
                        title = CASE WHEN title = '' AND ? <> '' THEN ? ELSE title END,
                        redirect_from = CASE
-                            WHEN redirect_from = '' AND ? <> '' THEN ? ELSE redirect_from END
+                            WHEN redirect_from = '' AND ? <> '' THEN ? ELSE redirect_from END,
+                       language = CASE WHEN ? <> '' THEN ? ELSE language END
                  WHERE id = ?
                 """,
                 (
@@ -776,6 +802,8 @@ class Storage:
                     title,
                     redirect_from,
                     redirect_from,
+                    language,
+                    language,
                     site_id,
                 ),
             )
@@ -877,6 +905,53 @@ class Storage:
             """,
             (limit,),
         )
+
+    # -- 언어 판별 캐시 ----------------------------------------------------
+    def domain_language(self, domain: str, max_age_days: int = 0) -> sqlite3.Row | None:
+        """도메인의 언어 판별 결과. 오래됐으면 ``None`` (다시 판별하도록)."""
+        if not domain:
+            return None
+        sql = "SELECT * FROM domain_language WHERE domain = ?"
+        params: list[Any] = [domain]
+        if max_age_days > 0:
+            sql += " AND checked_at >= ?"
+            params.append(days_ago(max_age_days))
+        rows = self._query(sql, params)
+        return rows[0] if rows else None
+
+    def record_domain_language(
+        self,
+        domain: str,
+        *,
+        language: str,
+        reason: str = "",
+        hangul_ratio: float = 0.0,
+        encoding: str = "",
+    ) -> None:
+        """판별 결과를 기록합니다. 저장하지 않기로 한 외국어 도메인도 남깁니다."""
+        if not domain:
+            return
+        self._execute(
+            """
+            INSERT INTO domain_language
+                   (domain, language, reason, hangul_ratio, encoding, checked_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(domain) DO UPDATE SET
+                language = excluded.language,
+                reason = excluded.reason,
+                hangul_ratio = excluded.hangul_ratio,
+                encoding = excluded.encoding,
+                checked_at = excluded.checked_at
+            """,
+            (domain, language, reason, hangul_ratio, encoding, iso_now()),
+        )
+
+    def language_counts(self) -> dict[str, int]:
+        """판별한 도메인을 언어별로 셉니다 (요약/상태 표시용)."""
+        rows = self._query(
+            "SELECT language, COUNT(*) AS n FROM domain_language GROUP BY language"
+        )
+        return {row["language"]: int(row["n"]) for row in rows}
 
     def reclassify_site_as_promo(self, domain: str) -> int:
         """홍보사이트로 확정된 도메인이 불법사이트 목록에도 들어가 있으면 제외 처리.
@@ -1082,6 +1157,11 @@ class Storage:
                         (CRAWLABLE_STATE,),
                     )[0]["n"]
                 ),
+                "foreign_domains": int(
+                    self._query(
+                        "SELECT COUNT(*) AS n FROM domain_language WHERE language = 'foreign'"
+                    )[0]["n"]
+                ),
                 "by_category": [dict(row) for row in by_category],
             }
         )
@@ -1098,7 +1178,8 @@ class Storage:
             UPDATE runs
                SET finished_at = ?, sources_total = ?, sources_ok = ?, sources_failed = ?,
                    pages_fetched = ?, candidates_found = ?, new_sites = ?, updated_sites = ?,
-                   duration_ms = ?, note = ?, candidates_added = ?, sources_approved = ?
+                   duration_ms = ?, note = ?, candidates_added = ?, sources_approved = ?,
+                   dropped_foreign = ?
              WHERE id = ?
             """,
             (
@@ -1114,6 +1195,7 @@ class Storage:
                 stats.note[:500],
                 stats.candidates_added,
                 stats.sources_approved,
+                stats.dropped_foreign,
                 run_id,
             ),
         )

@@ -84,6 +84,31 @@ LANDING_PAGE = """<!doctype html>
 """
 
 
+# 언어 필터 확인용 페이지들
+KOREAN_PAGE = """<!doctype html>
+<html lang="ko"><head><title>ABC777 카지노</title></head>
+<body>
+  <h1>실시간 라이브 카지노</h1>
+  <p>지금 가입하시면 첫충 이벤트를 드립니다. 고객센터로 문의해 주세요.</p>
+  <p>사업자등록번호 없음. 안전한 놀이터를 약속드립니다.</p>
+</body></html>
+"""
+
+ENGLISH_PAGE = """<!doctype html>
+<html lang="en"><head><title>Best Online Casino</title></head>
+<body>
+  <h1>Welcome to the best online casino</h1>
+  <p>Join now and claim your welcome bonus. Contact our support team anytime.</p>
+  <p>We offer live dealer games, slots and sports betting for players worldwide.</p>
+</body></html>
+"""
+
+# 자바스크립트로만 그려지는 페이지 — 판별 불가로 처리돼야 합니다.
+EMPTY_PAGE = """<!doctype html><html><head><title>...</title></head>
+<body><div id="app"></div><script>render();</script></body></html>
+"""
+
+
 class _PartnerHandler(BaseHTTPRequestHandler):
     """두 번째 홍보사이트 + 불법사이트 본체 흉내."""
 
@@ -102,6 +127,20 @@ class _PartnerHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path.startswith("/landing"):
             self._respond(LANDING_PAGE.encode("utf-8"))
+        elif self.path.startswith("/korean"):
+            self._respond(KOREAN_PAGE.encode("utf-8"))
+        elif self.path.startswith("/euckr"):
+            # EUC-KR 로 내려주는 한국어 페이지 (인코딩만으로 판별되어야 함)
+            self.send_response(200)
+            body = KOREAN_PAGE.encode("cp949")
+            self.send_header("Content-Type", "text/html; charset=euc-kr")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path.startswith("/english"):
+            self._respond(ENGLISH_PAGE.encode("utf-8"))
+        elif self.path.startswith("/empty"):
+            self._respond(EMPTY_PAGE.encode("utf-8"))
         elif self.path in {"/", "/index.html"}:
             self._respond(PARTNER_INDEX.encode("utf-8"))
         else:
@@ -214,6 +253,10 @@ crawl:
   respect_robots: true
 alive_check:
   enabled: false
+language_filter:
+  # 테스트는 외부 인터넷에 나가지 않아야 합니다. 판별용 요청을 기본으로 끄고,
+  # 필요한 테스트에서만 켭니다(그 경우에도 로컬 픽스처 주소만 씁니다).
+  fetch_when_unknown: false
 export:
   directory: "exports"
   filename: "결과.xlsx"

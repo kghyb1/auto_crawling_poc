@@ -67,6 +67,22 @@ DEFAULTS: dict[str, Any] = {
         "auto_disable_after_failures": 10,
         "mirror_similarity": 0.8,
     },
+    "language_filter": {
+        "enabled": True,
+        "keep": ["ko"],
+        "korean_tlds": ["kr"],
+        # 한국어 사이트가 있을 가능성이 매우 낮은 국가 TLD 만 넣습니다.
+        # 여기 넣으면 접속 없이 바로 버리므로 보수적으로 잡아야 합니다.
+        "foreign_tlds": [
+            "jp", "cn", "tw", "ru", "vn", "th", "de", "fr", "it", "es",
+            "nl", "pl", "tr", "ua", "br", "mx", "ir", "sa",
+        ],
+        "min_hangul_ratio": 0.05,
+        "fetch_when_unknown": True,
+        "max_checks_per_cycle": 30,
+        "keep_when_undetermined": True,
+        "recheck_after_days": 90,
+    },
     "export": {
         "directory": "data/exports",
         "filename": "불법사이트_URL목록.xlsx",
@@ -180,6 +196,19 @@ class DiscoveryConfig:
 
 
 @dataclass(frozen=True)
+class LanguageFilterConfig:
+    enabled: bool
+    keep: list[str]
+    korean_tlds: list[str]
+    foreign_tlds: list[str]
+    min_hangul_ratio: float
+    fetch_when_unknown: bool
+    max_checks_per_cycle: int
+    keep_when_undetermined: bool
+    recheck_after_days: int
+
+
+@dataclass(frozen=True)
 class ExportConfig:
     directory: str
     filename: str
@@ -227,6 +256,7 @@ class Config:
     renderer: RendererConfig
     alive_check: AliveCheckConfig
     discovery: DiscoveryConfig
+    language_filter: LanguageFilterConfig
     export: ExportConfig
     storage: StorageConfig
     dashboard: DashboardConfig
@@ -295,6 +325,9 @@ def load_config(path: str | Path | None = None, root: Path | None = None) -> Con
         renderer=_build(RendererConfig, merged["renderer"], "renderer"),
         alive_check=_build(AliveCheckConfig, merged["alive_check"], "alive_check"),
         discovery=_build(DiscoveryConfig, merged["discovery"], "discovery"),
+        language_filter=_build(
+            LanguageFilterConfig, merged["language_filter"], "language_filter"
+        ),
         export=_build(ExportConfig, merged["export"], "export"),
         storage=_build(StorageConfig, merged["storage"], "storage"),
         dashboard=_build(DashboardConfig, merged["dashboard"], "dashboard"),
@@ -320,6 +353,23 @@ def _validate(config: Config) -> None:
         raise ConfigError("crawl.max_pages_per_source 는 1 이상이어야 합니다.")
     if not 0 <= config.export.min_score <= 100:
         raise ConfigError("export.min_score 는 0~100 범위여야 합니다.")
+    language = config.language_filter
+    if not 0 <= language.min_hangul_ratio <= 1:
+        raise ConfigError("language_filter.min_hangul_ratio 는 0~1 범위여야 합니다.")
+    if language.max_checks_per_cycle < 0:
+        raise ConfigError("language_filter.max_checks_per_cycle 는 0 이상이어야 합니다.")
+    if language.enabled and not language.keep:
+        raise ConfigError(
+            "language_filter.keep 이 비어 있으면 아무것도 저장되지 않습니다. "
+            "['ko'] 처럼 남길 언어를 지정하거나 enabled 를 false 로 하세요."
+        )
+    overlap = set(language.korean_tlds) & set(language.foreign_tlds)
+    if overlap:
+        raise ConfigError(
+            f"language_filter 의 korean_tlds 와 foreign_tlds 가 겹칩니다: "
+            f"{', '.join(sorted(overlap))}"
+        )
+
     if not 0 <= config.export.csv_min_score <= 100:
         raise ConfigError("export.csv_min_score 는 0~100 범위여야 합니다.")
     if config.export.group_by not in GROUP_MODES:

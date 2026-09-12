@@ -303,6 +303,7 @@ def cmd_status(args: argparse.Namespace, config: Config) -> int:
                 ("홍보사이트 사용/등록",
                  f"{summary.get('sources_enabled', 0)} / {summary.get('sources_total', 0)}"
                  f" (자동 발견 {summary.get('sources_auto', 0)})"),
+                ("외국어로 제외", f"{summary.get('foreign_domains', 0)}개 도메인"),
                 ("검토 대기 후보",
                  f"{summary.get('candidates_pending', 0)}건"
                  f" (평가 대기 {summary.get('candidates_discovered', 0)}건)"),
