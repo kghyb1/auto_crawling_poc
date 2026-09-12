@@ -106,6 +106,13 @@ python bot.py list-sources
 python bot.py preview "https://홍보사이트주소/"
 ```
 
+망이 막혀 있거나 그 사이트에 접속하고 싶지 않으면, 브라우저로 페이지를
+저장한 뒤 파일로 검사할 수 있습니다. URL 은 상대링크를 풀 기준으로만 씁니다.
+
+```bash
+python bot.py preview "https://홍보사이트주소/" --html-file 저장한페이지.html
+```
+
 **4) 봇을 실행합니다.**
 
 ```bash
@@ -445,7 +452,7 @@ DB 저장을 막는 것은 되돌릴 수 없으므로, 무엇을 왜 버렸는�
 | `bot.py remove-source URL` | 홍보사이트 삭제 |
 | `bot.py import-targets` | `config/targets.yaml` 을 DB 에 반영 |
 | `bot.py mark URL --status ... --memo ...` | 처리 상태·메모 기록 |
-| `bot.py preview URL [--all]` | 저장하지 않고 추출·판별 결과만 확인 |
+| `bot.py preview URL [--all] [--html-file PATH]` | 저장하지 않고 추출·판별 결과만 확인 (`--html-file` 은 저장해둔 HTML 로 검사) |
 | `bot.py candidates [--state ...]` | 봇이 찾아낸 홍보사이트 후보 목록 |
 | `bot.py approve URL` / `reject URL` | 후보 승인 / 기각 |
 | `bot.py evaluate URL [--add]` | 어떤 주소가 홍보사이트인지 점수만 계산 |

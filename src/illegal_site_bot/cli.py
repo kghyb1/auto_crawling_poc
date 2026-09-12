@@ -659,6 +659,19 @@ def cmd_preview(args: argparse.Namespace, config: Config) -> int:
     classifier = Classifier(load_rules(config.root / "config" / "rules.yaml"))
     targets = load_targets(config.root / "config" / "targets.yaml")
 
+    html_file = getattr(args, "html_file", None)
+    if html_file:
+        # 망이 막힌 곳에서 규칙을 시험할 때 씁니다. URL 은 상대링크를 풀 기준으로만 씁니다.
+        path = Path(html_file)
+        try:
+            html = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            print(f"파일을 읽지 못했습니다: {error}")
+            return EXIT_ERROR
+        print(f"파일에서 읽음: {path} ({len(html):,}자)")
+        print(f"  기준 주소: {url}")
+        return _preview_html(html, url, classifier, targets, show_all=args.all)
+
     print(f"수집 중: {url}")
     with Fetcher(config.crawl) as fetcher:
         result = fetcher.fetch(url)
@@ -666,45 +679,53 @@ def cmd_preview(args: argparse.Namespace, config: Config) -> int:
             print(f"가져오지 못했습니다: {result.error or result.status}")
             return EXIT_ERROR
         print(f"  HTTP {result.status}, {len(result.html):,}자, {result.elapsed_ms}ms")
-
-        extracted = extract(result.html, result.final_url or url, targets.pagination_patterns)
-        print(f"  제목: {extracted.title or '-'}")
-        print(f"  외부 링크 후보 {len(extracted.candidates)}건, 내부 페이지 {len(extracted.internal_links)}건\n")
-
-        kept: list[tuple[int, str, str, str, str]] = []
-        excluded = 0
-        below = 0
-        for candidate in extracted.candidates:
-            verdict = classifier.classify(
-                candidate.url, candidate.anchor_text, candidate.context_text
-            )
-            if verdict.excluded:
-                excluded += 1
-                continue
-            if verdict.score < classifier.rules.candidate_threshold and not verdict.always_keep:
-                below += 1
-                if not args.all:
-                    continue
-            kept.append(
-                (
-                    verdict.score,
-                    verdict.label,
-                    candidate.url,
-                    candidate.method,
-                    verdict.matched_keywords_text or verdict.reasons_text,
-                )
-            )
-
-        kept.sort(reverse=True)
-        print(f"{'점수':<6}{'카테고리':<12}{'방법':<12}URL / 근거")
-        for score, label, candidate_url, method, why in kept:
-            print(f"{score:<6}{label:<12}{method:<12}{candidate_url}")
-            if why:
-                print(f"{'':<30}└ {why}")
-        print(
-            f"\n제외 {excluded}건, 기준({classifier.rules.candidate_threshold}점) 미달 {below}건"
-            + ("" if args.all else " (--all 로 함께 볼 수 있습니다)")
+        return _preview_html(
+            result.html, result.final_url or url, classifier, targets, show_all=args.all
         )
+
+
+def _preview_html(html, base_url, classifier, targets, *, show_all: bool) -> int:
+    """받아둔 HTML 로 추출·판별 결과만 출력합니다."""
+    from .extractor import extract
+
+    extracted = extract(html, base_url, targets.pagination_patterns)
+    print(f"  제목: {extracted.title or '-'}")
+    print(f"  외부 링크 후보 {len(extracted.candidates)}건, 내부 페이지 {len(extracted.internal_links)}건\n")
+
+    kept: list[tuple[int, str, str, str, str]] = []
+    excluded = 0
+    below = 0
+    for candidate in extracted.candidates:
+        verdict = classifier.classify(
+            candidate.url, candidate.anchor_text, candidate.context_text
+        )
+        if verdict.excluded:
+            excluded += 1
+            continue
+        if verdict.score < classifier.rules.candidate_threshold and not verdict.always_keep:
+            below += 1
+            if not show_all:
+                continue
+        kept.append(
+            (
+                verdict.score,
+                verdict.label,
+                candidate.url,
+                candidate.method,
+                verdict.matched_keywords_text or verdict.reasons_text,
+            )
+        )
+
+    kept.sort(reverse=True)
+    print(f"{'점수':<6}{'카테고리':<12}{'방법':<12}URL / 근거")
+    for score, label, candidate_url, method, why in kept:
+        print(f"{score:<6}{label:<12}{method:<12}{candidate_url}")
+        if why:
+            print(f"{'':<30}└ {why}")
+    print(
+        f"\n제외 {excluded}건, 기준({classifier.rules.candidate_threshold}점) 미달 {below}건"
+        + ("" if show_all else " (--all 로 함께 볼 수 있습니다)")
+    )
     return EXIT_OK
 
 
@@ -831,6 +852,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     preview.add_argument("url", metavar="URL")
     preview.add_argument("--all", action="store_true", help="기준 미달 후보도 함께 표시")
+    preview.add_argument(
+        "--html-file",
+        metavar="PATH",
+        help="저장해둔 HTML 파일로 검사 (URL 은 상대링크 기준으로만 사용)",
+    )
     preview.set_defaults(func=cmd_preview)
 
     return parser
